@@ -2,7 +2,7 @@ module Chilin.Types where
 
 import Control.Concurrent.MVar (MVar)
 import Control.Exception (Exception, throwIO)
-import Data.Aeson (FromJSON, ToJSON (..), Value, object, (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.=))
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 import Database.SQLite.Simple (Connection)
@@ -21,8 +21,14 @@ data Actor = Actor
   , actorAdmin :: Bool
   }
   deriving (Eq, Show, Generic)
-instance ToJSON Actor
-instance FromJSON Actor
+
+-- Field names are part of the HTTP contract, so they are written explicitly
+-- rather than derived from the Haskell record selectors.
+instance ToJSON Actor where
+  toJSON a = object ["id" .= actorId a, "admin" .= actorAdmin a]
+
+instance FromJSON Actor where
+  parseJSON = withObject "Actor" $ \o -> Actor <$> o .: "id" <*> o .: "admin"
 
 data Repo = Repo
   { repoId :: Text
@@ -31,8 +37,12 @@ data Repo = Repo
   , repoPublic :: Bool
   }
   deriving (Eq, Show, Generic)
-instance ToJSON Repo
-instance FromJSON Repo
+
+instance ToJSON Repo where
+  toJSON r = object ["id" .= repoId r, "owner" .= repoOwner r, "name" .= repoName r, "public" .= repoPublic r]
+
+instance FromJSON Repo where
+  parseJSON = withObject "Repo" $ \o -> Repo <$> o .: "id" <*> o .: "owner" <*> o .: "name" <*> o .: "public"
 
 data Access = ReadAccess | WriteAccess | AdminAccess deriving (Eq, Ord, Show)
 
