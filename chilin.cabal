@@ -1,0 +1,85 @@
+cabal-version: 3.0
+name:          chilin
+version:       0.1.0.0
+synopsis:      Git hosting with myque-backed collaboration
+license:       BSD-3-Clause
+build-type:    Simple
+
+common shared
+  default-language:   GHC2021
+  default-extensions:
+    DeriveGeneric
+    LambdaCase
+    OverloadedStrings
+
+  ghc-options:
+    -Wall -Wcompat -Wincomplete-uni-patterns
+    -Wincomplete-record-updates
+
+library
+  import:          shared
+  hs-source-dirs:  src
+  exposed-modules:
+    Chilin.Git
+    Chilin.Items
+    Chilin.Pulls
+    Chilin.Repository
+    Chilin.Server
+    Chilin.Store
+    Chilin.Transport
+    Chilin.Types
+
+  build-depends:
+    , aeson
+    , async
+    , base               >=4.18 && <5
+    , base64-bytestring
+    , bytestring
+    , case-insensitive
+    , containers
+    , crypton
+    , directory
+    , filelock
+    , filepath
+    , http-types
+    , memory
+    , myque
+    , network
+    , process
+    , sqlite-simple
+    , stm
+    , temporary
+    , text
+    , time
+    , unix
+    , wai
+    , warp
+
+executable chilin
+  import:         shared
+  hs-source-dirs: app
+  main-is:        Main.hs
+  ghc-options:    -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+    , base
+    , chilin
+    , text
+
+test-suite chilin-test
+  import:         shared
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        Spec.hs
+  ghc-options:    -threaded
+  build-depends:
+    , aeson
+    , base
+    , bytestring
+    , chilin
+    , containers
+    , directory
+    , filepath
+    , hspec
+    , myque
+    , temporary
+    , text
