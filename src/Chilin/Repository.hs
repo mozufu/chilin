@@ -1,8 +1,16 @@
 module Chilin.Repository
   ( openEnv
+  , openEnvWith
   , bootstrapAdmin
   , lookupActor
+  , lookupIdentity
   , createUser
+  , listTokens
+  , createToken
+  , revokeToken
+  , listIdentities
+  , linkIdentity
+  , unlinkIdentity
   , createRepo
   , listRepos
   , lookupRepo
@@ -27,6 +35,7 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Time (defaultTimeLocale, formatTime, getCurrentTime)
 import Database.SQLite.Simple
 import GHC.IO.Encoding (setLocaleEncoding, utf8)
 import Network.HTTP.Types (status500)
@@ -38,7 +47,10 @@ import System.FilePath ((</>))
 import System.Posix.Files (setFileMode)
 
 openEnv :: FilePath -> IO Env
-openEnv root = do
+openEnv root = openEnvWith root Nothing
+
+openEnvWith :: FilePath -> Maybe ForwardAuth -> IO Env
+openEnvWith root forward = do
   -- myque's public filesystem loader uses the process text encoding.
   setLocaleEncoding utf8
   createDirectoryIfMissing True root
@@ -58,7 +70,19 @@ openEnv root = do
     execute_ db "CREATE TABLE IF NOT EXISTS tokens (digest BLOB PRIMARY KEY, user_name TEXT NOT NULL REFERENCES users(name) ON DELETE CASCADE)"
     execute_ db "CREATE TABLE IF NOT EXISTS repositories (id TEXT PRIMARY KEY, owner TEXT NOT NULL REFERENCES users(name), name TEXT NOT NULL, public INTEGER NOT NULL CHECK(public IN (0,1)), state TEXT NOT NULL CHECK(state IN ('pending','ready')), UNIQUE(owner,name))"
     execute_ db "CREATE TABLE IF NOT EXISTS permissions (repo_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE, user_name TEXT NOT NULL REFERENCES users(name) ON DELETE CASCADE, access INTEGER NOT NULL CHECK(access BETWEEN 0 AND 2), PRIMARY KEY(repo_id,user_name))"
-  Env absolute git <$> newMVar db <*> newMVar Map.empty
+    -- Presence of a row is the allowlist; proxy-asserted subjects without one
+    -- are rejected. 'subject' is opaque, letting a provider migrate from a
+    -- mutable login to a stable numeric id without a schema change.
+    execute_ db "CREATE TABLE IF NOT EXISTS identities (provider TEXT NOT NULL, subject TEXT NOT NULL, user_name TEXT NOT NULL REFERENCES users(name) ON DELETE CASCADE, PRIMARY KEY(provider,subject))"
+    columns <- query_ db "SELECT name FROM pragma_table_info('tokens')" :: IO [Only Text]
+    let present name = Only name `elem` columns
+    unless (present "id") $ do
+      execute_ db "ALTER TABLE tokens ADD COLUMN id TEXT"
+      execute_ db "UPDATE tokens SET id = lower(hex(randomblob(16))) WHERE id IS NULL"
+      execute_ db "CREATE UNIQUE INDEX IF NOT EXISTS tokens_id ON tokens(id)"
+    unless (present "label") $ execute_ db "ALTER TABLE tokens ADD COLUMN label TEXT NOT NULL DEFAULT 'legacy'"
+    unless (present "created_at") $ execute_ db "ALTER TABLE tokens ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"
+  Env absolute git <$> newMVar db <*> newMVar Map.empty <*> pure forward
 
 validateName :: Text -> IO ()
 validateName name = unless (not (T.null name) && T.length name <= 100 && T.all allowed name && name /= "." && name /= "..") $ badRequest "Names must contain 1..100 ASCII letters, digits, hyphens, underscores or dots"
@@ -71,6 +95,45 @@ tokenDigest token = convert (hash (TE.encodeUtf8 token) :: Digest SHA256)
 validateToken :: Text -> IO ()
 validateToken token = unless (T.length token >= 32 && T.length token <= 4096 && T.all (\c -> c >= '!' && c <= '~') token) $ badRequest "Tokens must contain 32..4096 printable non-space ASCII characters"
 
+validateLabel :: Text -> IO ()
+validateLabel label =
+  unless (not (T.null label) && T.length label <= 100 && T.all (\c -> c >= ' ' && c <= '~') label) $
+    badRequest "Labels must contain 1..100 printable ASCII characters"
+
+validateSubject :: Text -> IO ()
+validateSubject subject =
+  unless (not (T.null subject) && T.length subject <= 255 && T.all (\c -> c > ' ' && c <= '~') subject) $
+    badRequest "Subjects must contain 1..255 printable non-space ASCII characters"
+
+validateProvider :: Text -> IO ()
+validateProvider provider =
+  unless (not (T.null provider) && T.length provider <= 32 && T.all (\c -> isAsciiLower c || isDigit c || c == '-') provider) $
+    badRequest "Providers must contain 1..32 lowercase ASCII letters, digits, or hyphens"
+
+hex :: BS.ByteString -> Text
+hex = T.pack . concatMap (\n -> let s = showHex n "" in if length s == 1 then '0' : s else s) . BS.unpack
+
+-- 32 bytes of CSPRNG output rendered as 64 hex characters, satisfying
+-- validateToken without depending on it.
+newSecret :: IO Text
+newSecret = hex <$> (getRandomBytes 32 :: IO BS.ByteString)
+
+newTokenId :: IO Text
+newTokenId = hex <$> (getRandomBytes 16 :: IO BS.ByteString)
+
+timestamp :: IO Text
+timestamp = T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" <$> getCurrentTime
+
+insertToken :: Connection -> Text -> Text -> Text -> IO TokenInfo
+insertToken db user secret label = do
+  ident <- newTokenId
+  now <- timestamp
+  execute
+    db
+    "INSERT INTO tokens(digest,user_name,id,label,created_at) VALUES (?,?,?,?,?)"
+    (tokenDigest secret, user, ident, label, now)
+  pure (TokenInfo ident label now)
+
 bootstrapAdmin :: Env -> Text -> Text -> IO ()
 bootstrapAdmin env name token = do
   validateName name
@@ -82,7 +145,8 @@ bootstrapAdmin env name token = do
       ([Only True], [(digest, owner)]) | owner == name && constEq digest (tokenDigest token) -> pure ()
       ([], []) -> do
         execute db "INSERT INTO users(name,admin) VALUES (?,1)" (Only name)
-        execute db "INSERT INTO tokens(digest,user_name) VALUES (?,?)" (tokenDigest token, name)
+        _ <- insertToken db name token "bootstrap"
+        pure ()
       _ -> conflict "Bootstrap identity or token conflicts with the registry"
 
 lookupActor :: Env -> Text -> IO (Maybe Actor)
@@ -106,19 +170,95 @@ isAdmin db actor = do
   rows <- query db "SELECT admin FROM users WHERE name=?" (Only (actorId actor)) :: IO [Only Bool]
   pure (rows == [Only True])
 
-createUser :: Env -> Actor -> Text -> Text -> IO Actor
-createUser env actor name token = do
+-- The secret is generated here and returned exactly once; only its digest is
+-- persisted, so an administrator can never recover or choose a user's token.
+createUser :: Env -> Actor -> Text -> IO (Actor, Text, TokenInfo)
+createUser env actor name = do
   validateName name
-  validateToken token
+  secret <- newSecret
   withMVar (envDatabase env) $ \db -> withTransaction db $ do
     allowed <- isAdmin db actor
     unless allowed $ forbidden "Administrator access required"
     names <- query db "SELECT name FROM users WHERE name=?" (Only name) :: IO [Only Text]
-    tokens <- query db "SELECT user_name FROM tokens WHERE digest=?" (Only (tokenDigest token)) :: IO [Only Text]
-    unless (null names && null tokens) $ conflict "User or token already exists"
+    unless (null names) $ conflict "User already exists"
     execute db "INSERT INTO users(name,admin) VALUES (?,0)" (Only name)
-    execute db "INSERT INTO tokens(digest,user_name) VALUES (?,?)" (tokenDigest token, name)
-    pure (Actor name False)
+    info <- insertToken db name secret "initial"
+    pure (Actor name False, secret, info)
+
+listTokens :: Env -> Actor -> IO [TokenInfo]
+listTokens env actor = withMVar (envDatabase env) $ \db -> do
+  rows <- query db "SELECT id,label,created_at FROM tokens WHERE user_name=? ORDER BY created_at,id" (Only (actorId actor))
+  pure [TokenInfo ident label createdAt | (ident, label, createdAt) <- rows]
+
+-- Returns the secret alongside its metadata. Callers must surface it once and
+-- never persist it; no later read path can reproduce it.
+createToken :: Env -> Actor -> Text -> IO (Text, TokenInfo)
+createToken env actor label = do
+  validateLabel label
+  secret <- newSecret
+  info <- withMVar (envDatabase env) $ \db -> withTransaction db $ do
+    count <- query db "SELECT COUNT(*) FROM tokens WHERE user_name=?" (Only (actorId actor)) :: IO [Only Int]
+    when (count >= [Only 64]) $ conflict "Token limit reached; revoke an existing token first"
+    insertToken db (actorId actor) secret label
+  pure (secret, info)
+
+-- A user may only revoke their own credentials, and never their last one:
+-- Git access has no other authenticator.
+revokeToken :: Env -> Actor -> Text -> IO ()
+revokeToken env actor ident = withMVar (envDatabase env) $ \db -> withTransaction db $ do
+  rows <- query db "SELECT id FROM tokens WHERE user_name=? AND id=?" (actorId actor, ident) :: IO [Only Text]
+  when (null rows) $ notFound "Token not found"
+  remaining <- query db "SELECT COUNT(*) FROM tokens WHERE user_name=?" (Only (actorId actor)) :: IO [Only Int]
+  when (remaining <= [Only 1]) $ conflict "Cannot revoke the only remaining token"
+  execute db "DELETE FROM tokens WHERE user_name=? AND id=?" (actorId actor, ident)
+
+-- The allowlist gate. A proxy-asserted subject resolves to an account only
+-- when an administrator has already linked it.
+lookupIdentity :: Env -> Text -> Text -> IO (Maybe Actor)
+lookupIdentity env provider subject = withMVar (envDatabase env) $ \db -> do
+  rows <-
+    query
+      db
+      "SELECT u.name,u.admin FROM identities i JOIN users u ON u.name=i.user_name WHERE i.provider=? AND i.subject=?"
+      (provider, subject)
+  pure $ case rows of
+    [(name, admin)] -> Just (Actor name admin)
+    _ -> Nothing
+
+listIdentities :: Env -> Actor -> IO [IdentityInfo]
+listIdentities env actor = withMVar (envDatabase env) $ \db -> do
+  admin <- isAdmin db actor
+  rows <-
+    if admin
+      then query_ db "SELECT provider,subject,user_name FROM identities ORDER BY provider,subject"
+      else query db "SELECT provider,subject,user_name FROM identities WHERE user_name=? ORDER BY provider,subject" (Only (actorId actor))
+  pure [IdentityInfo provider subject user | (provider, subject, user) <- rows]
+
+linkIdentity :: Env -> Actor -> Text -> Text -> Text -> IO IdentityInfo
+linkIdentity env actor provider subject user = do
+  validateProvider provider
+  validateSubject subject
+  validateName user
+  withMVar (envDatabase env) $ \db -> withTransaction db $ do
+    allowed <- isAdmin db actor
+    unless allowed $ forbidden "Administrator access required"
+    users <- query db "SELECT name FROM users WHERE name=?" (Only user) :: IO [Only Text]
+    when (null users) $ notFound "User does not exist"
+    existing <- query db "SELECT user_name FROM identities WHERE provider=? AND subject=?" (provider, subject) :: IO [Only Text]
+    unless (null existing) $ conflict "Identity is already linked"
+    execute db "INSERT INTO identities(provider,subject,user_name) VALUES (?,?,?)" (provider, subject, user)
+    pure (IdentityInfo provider subject user)
+
+unlinkIdentity :: Env -> Actor -> Text -> Text -> IO ()
+unlinkIdentity env actor provider subject = do
+  validateProvider provider
+  validateSubject subject
+  withMVar (envDatabase env) $ \db -> withTransaction db $ do
+    allowed <- isAdmin db actor
+    unless allowed $ forbidden "Administrator access required"
+    rows <- query db "SELECT user_name FROM identities WHERE provider=? AND subject=?" (provider, subject) :: IO [Only Text]
+    when (null rows) $ notFound "Identity not found"
+    execute db "DELETE FROM identities WHERE provider=? AND subject=?" (provider, subject)
 
 newRepoId :: IO Text
 newRepoId = do
@@ -169,8 +309,8 @@ createRepo env actor owner name public = do
 removePendingDirectory :: Env -> Text -> IO ()
 removePendingDirectory env ident = do
   let parts = T.splitOn "-" ident
-      hex c = isDigit c || c >= 'a' && c <= 'f'
-  unless (map T.length parts == [8, 4, 4, 4, 12] && all (T.all hex) parts) $
+      hexDigit c = isDigit c || c >= 'a' && c <= 'f'
+  unless (map T.length parts == [8, 4, 4, 4, 12] && all (T.all hexDigit) parts) $
     conflict "Invalid pending repository identity"
   let directory = envRoot env </> "repos" </> T.unpack ident
   exists <- doesPathExist directory

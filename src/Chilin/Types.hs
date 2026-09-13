@@ -3,17 +3,28 @@ module Chilin.Types where
 import Control.Concurrent.MVar (MVar)
 import Control.Exception (Exception, throwIO)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.=))
+import Data.ByteString (ByteString)
+import Data.CaseInsensitive (CI)
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 import Database.SQLite.Simple (Connection)
 import GHC.Generics (Generic)
 import Network.HTTP.Types (Status, status400, status403, status404, status409, status412)
 
+-- Identity asserted by a trusted reverse proxy. Only honoured for loopback
+-- peers; see Chilin.Server.forwardActor.
+data ForwardAuth = ForwardAuth
+  { forwardHeader :: CI ByteString
+  , forwardProvider :: Text
+  }
+  deriving (Eq, Show)
+
 data Env = Env
   { envRoot :: FilePath
   , envGit :: FilePath
   , envDatabase :: MVar Connection
   , envLocks :: MVar (Map Text (MVar ()))
+  , envForwardAuth :: Maybe ForwardAuth
   }
 
 data Actor = Actor
@@ -29,6 +40,30 @@ instance ToJSON Actor where
 
 instance FromJSON Actor where
   parseJSON = withObject "Actor" $ \o -> Actor <$> o .: "id" <*> o .: "admin"
+
+-- Credential metadata. The secret itself is never stored, only its digest,
+-- so a token value is returned exactly once by createToken.
+data TokenInfo = TokenInfo
+  { tokenInfoId :: Text
+  , tokenInfoLabel :: Text
+  , tokenInfoCreatedAt :: Text
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON TokenInfo where
+  toJSON t = object ["id" .= tokenInfoId t, "label" .= tokenInfoLabel t, "created_at" .= tokenInfoCreatedAt t]
+
+-- An external identity permitted to assume a chilin account. Presence in this
+-- table is the allowlist: proxy-asserted subjects without a row are rejected.
+data IdentityInfo = IdentityInfo
+  { identityProvider :: Text
+  , identitySubject :: Text
+  , identityUser :: Text
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON IdentityInfo where
+  toJSON i = object ["provider" .= identityProvider i, "subject" .= identitySubject i, "user" .= identityUser i]
 
 data Repo = Repo
   { repoId :: Text

@@ -3,24 +3,84 @@ module Main (main) where
 import Chilin.Git
 import Chilin.Items
 import Chilin.Repository
+import Chilin.Server (application)
 import Chilin.Store
 import Chilin.Types
 import Control.Exception (try)
-import Data.Aeson (Value (..), object, (.=))
+import Data.Aeson (Value (..), decode, object, toJSON, (.=))
 import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString.Builder (toLazyByteString)
+import Data.ByteString.Lazy qualified as BL
+import Data.CaseInsensitive qualified as CI
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Myque.Item (State (Open), itemState)
+import Network.HTTP.Types (Header, Method, Status, hAuthorization, hContentType, methodGet, methodPost, status200, status401, status403, statusCode)
+import Network.Socket (SockAddr (..), tupleToHostAddress)
+import Network.Wai (Request (..), defaultRequest, responseToStream, setRequestBodyChunks)
+import Network.Wai.Internal (ResponseReceived (..))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
-withRepository :: (Env -> Actor -> Repo -> IO a) -> IO a
-withRepository action = withSystemTempDirectory "chilin-test" $ \root -> do
-  env <- openEnv root
+withRegistry :: Maybe ForwardAuth -> (Env -> IO a) -> IO a
+withRegistry forward action = withSystemTempDirectory "chilin-test" $ \root -> do
+  env <- openEnvWith root forward
   bootstrapAdmin env "alice" "alice-test-token-at-least-thirty-two-characters"
-  let actor = Actor "alice" True
-  repo <- createRepo env actor "alice" "project" False
-  action env actor repo
+  action env
+
+forwardAuth :: Maybe ForwardAuth
+forwardAuth = Just (ForwardAuth (CI.mk "x-forwarded-user") "github")
+
+admin :: Actor
+admin = Actor "alice" True
+
+-- Exercises the WAI application the way the proxy does, so peer address and
+-- header handling are covered rather than the underlying registry calls.
+call :: Env -> SockAddr -> [Header] -> [Text] -> IO (Status, Maybe Value)
+call env peer headers path = callWith methodGet env peer headers path ""
+
+callWith :: Method -> Env -> SockAddr -> [Header] -> [Text] -> BL.ByteString -> IO (Status, Maybe Value)
+callWith method env peer headers path payload = do
+  remaining <- newIORef (BL.toStrict payload)
+  let wai =
+        setRequestBodyChunks (readIORef remaining >>= \chunk -> writeIORef remaining mempty >> pure chunk) $
+          defaultRequest
+            { requestMethod = method
+            , pathInfo = path
+            , rawPathInfo = TE.encodeUtf8 ("/" <> T.intercalate "/" path)
+            , requestHeaders = headers
+            , remoteHost = peer
+            }
+  captured <- newIORef Nothing
+  ResponseReceived <- application env wai $ \r -> ResponseReceived <$ writeIORef captured (Just r)
+  response <- readIORef captured >>= maybe (fail "handler produced no response") pure
+  let (status, _, withBody) = responseToStream response
+  body <- withBody $ \streaming -> do
+    reference <- newIORef mempty
+    streaming (\chunk -> modifyIORef' reference (<> chunk)) (pure ())
+    toLazyByteString <$> readIORef reference
+  pure (status, decode body)
+
+bearer :: Text -> Header
+bearer token = (hAuthorization, "Bearer " <> TE.encodeUtf8 token)
+
+intent :: Header
+intent = ("X-Chilin-Intent", "1")
+
+json :: Header
+json = (hContentType, "application/json")
+
+loopback, remotePeer :: SockAddr
+loopback = SockAddrInet 0 (tupleToHostAddress (127, 0, 0, 1))
+remotePeer = SockAddrInet 0 (tupleToHostAddress (203, 0, 113, 7))
+
+withRepository :: (Env -> Actor -> Repo -> IO a) -> IO a
+withRepository action = withRegistry Nothing $ \env -> do
+  repo <- createRepo env admin "alice" "project" False
+  action env admin repo
 
 request :: Value
 request = object ["kind" .= ("issue" :: Text), "title" .= ("Track lifecycle" :: Text)]
@@ -82,3 +142,63 @@ main = hspec $ do
       rejected `shouldSatisfy` either (const True) (const False)
       current <- readSnapshot env (trackerPath env repo)
       snapshotRevision current `shouldBe` resultRevision linked
+
+  describe "proxy-asserted identity" $ do
+    it "ignores the identity header from a non-loopback peer" $ withRegistry forwardAuth $ \env -> do
+      _ <- linkIdentity env admin "github" "octocat" "alice"
+      (status, _) <- call env remotePeer [("X-Forwarded-User", "octocat")] ["api", "me"]
+      status `shouldBe` status401
+
+    it "accepts a linked subject from loopback" $ withRegistry forwardAuth $ \env -> do
+      _ <- linkIdentity env admin "github" "octocat" "alice"
+      (status, body) <- call env loopback [("X-Forwarded-User", "octocat")] ["api", "me"]
+      status `shouldBe` status200
+      case body of
+        Just (Object fields) -> KM.lookup "user" fields `shouldBe` Just (toJSON (Actor "alice" True))
+        _ -> expectationFailure "expected a user document"
+
+    it "refuses a subject that is not on the allowlist" $ withRegistry forwardAuth $ \env -> do
+      (status, _) <- call env loopback [("X-Forwarded-User", "stranger")] ["api", "me"]
+      status `shouldBe` status403
+
+    it "refuses a duplicated identity header the proxy failed to strip" $ withRegistry forwardAuth $ \env -> do
+      _ <- linkIdentity env admin "github" "octocat" "alice"
+      (status, _) <- call env loopback [("X-Forwarded-User", "octocat"), ("X-Forwarded-User", "mallory")] ["api", "me"]
+      status `shouldBe` status403
+
+    it "ignores the identity header entirely when forward auth is disabled" $ withRegistry Nothing $ \env -> do
+      _ <- linkIdentity env admin "github" "octocat" "alice"
+      (status, _) <- call env loopback [("X-Forwarded-User", "octocat")] ["api", "me"]
+      status `shouldBe` status401
+
+  describe "credentials" $ do
+    it "authenticates with a generated token and stops after revocation" $ withRegistry Nothing $ \env -> do
+      (secret, info) <- createToken env admin "laptop"
+      lookupActor env secret `shouldReturn` Just admin
+      revokeToken env admin (tokenInfoId info)
+      lookupActor env secret `shouldReturn` Nothing
+
+    it "refuses to revoke the last remaining token" $ withRegistry Nothing $ \env -> do
+      tokens <- listTokens env admin
+      case tokens of
+        [only] -> do
+          outcome <- try (revokeToken env admin (tokenInfoId only)) :: IO (Either AppError ())
+          outcome `shouldSatisfy` either (const True) (const False)
+          lookupActor env "alice-test-token-at-least-thirty-two-characters" `shouldReturn` Just admin
+        _ -> expectationFailure "bootstrap should leave exactly one token"
+
+    it "issues a working credential to a created user without the caller choosing it" $ withRegistry Nothing $ \env -> do
+      (created, secret, _) <- createUser env admin "bob"
+      created `shouldBe` Actor "bob" False
+      lookupActor env secret `shouldReturn` Just (Actor "bob" False)
+
+    it "rejects a credential mutation that omits the intent header" $ withRegistry Nothing $ \env -> do
+      (secret, _) <- createToken env admin "laptop"
+      (status, _) <- callWith methodPost env loopback [bearer secret, json] ["api", "tokens"] "{\"label\":\"ci\"}"
+      status `shouldBe` status403
+      (accepted, body) <- callWith methodPost env loopback [bearer secret, json, intent] ["api", "tokens"] "{\"label\":\"ci\"}"
+      statusCode accepted `shouldBe` 201
+      -- The secret is transmitted exactly once, at creation.
+      case body of
+        Just (Object fields) -> KM.member "secret" fields `shouldBe` True
+        _ -> expectationFailure "expected a credential document"

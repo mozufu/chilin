@@ -1,4 +1,4 @@
-module Chilin.Server (application, serve) where
+module Chilin.Server (application, serve, loopbackAddress) where
 
 import Chilin.Git qualified as Git
 import Chilin.Items qualified as Items
@@ -26,9 +26,15 @@ import Data.Text.Encoding qualified as TE
 import Myque.Item qualified as Myque
 import Network.HTTP.Types
 import Network.HTTP.Types.Header (hAllow, hETag, hIfMatch, hWWWAuthenticate)
+import Network.Socket (SockAddr (..), tupleToHostAddress)
 import Network.Wai
 import Network.Wai.Handler.Warp qualified as Warp
 import System.IO (hPutStrLn, stderr)
+
+-- Trusting a proxy-asserted identity is only sound while no remote peer can
+-- reach the listener. The CLI refuses to enable forward auth otherwise.
+loopbackAddress :: String -> Bool
+loopbackAddress host = host `elem` ["127.0.0.1", "::1", "localhost", "[::1]"]
 
 serve :: Env -> String -> Int -> IO ()
 serve env host port = do
@@ -55,12 +61,19 @@ application env request respond = do
   dispatch env request send `catch` onError
 
 errorResponse :: Status -> Text -> Response
-errorResponse status message =
+errorResponse = challengeResponse []
+
+-- A Basic challenge is only meaningful to Git's credential helper. Emitting it
+-- on API routes makes browsers raise a native password prompt for background
+-- fetches, so those routes answer 401 without one.
+challengeResponse :: ResponseHeaders -> Status -> Text -> Response
+challengeResponse headers status message =
   jsonResponse status headers $
     object
       ["error" .= object ["status" .= statusCode status, "message" .= message]]
- where
-  headers = [(hWWWAuthenticate, "Basic realm=\"Chilin\", charset=\"UTF-8\"") | status == status401]
+
+gitChallenge :: ResponseHeaders
+gitChallenge = [(hWWWAuthenticate, "Basic realm=\"Chilin\", charset=\"UTF-8\"")]
 
 jsonResponse :: Status -> ResponseHeaders -> Value -> Response
 jsonResponse status headers = responseLBS status ((hContentType, "application/json; charset=utf-8") : (hCacheControl, "no-store") : headers) . encode
@@ -74,19 +87,27 @@ dispatch env request send = case pathInfo request of
     noQuery request
     send $ jsonResponse status200 [] $ object ["status" .= ("ok" :: Text)]
   "api" : rest -> do
-    actor <- authenticate env request
+    actor <- apiAuthenticate env request
     api actor rest
   owner : filename : suffix
-    | Just (name, tracker) <- gitName filename -> do
-        actor <- authenticate env request
-        repo <-
-          Repository.lookupRepo env owner name `catch` \(err :: AppError) ->
-            if isNothing actor then unauthorized else throwIO err
-        when (isNothing actor && not (repoPublic repo)) unauthorized
-        Repository.requireAccess env actor repo ReadAccess
-        Transport.gitHttp env actor repo tracker suffix request send
+    | Just (name, tracker) <- gitName filename ->
+        withChallenge $ do
+          actor <- authenticate env request
+          repo <-
+            Repository.lookupRepo env owner name `catch` \(err :: AppError) ->
+              if isNothing actor then unauthorized else throwIO err
+          when (isNothing actor && not (repoPublic repo)) unauthorized
+          Repository.requireAccess env actor repo ReadAccess
+          Transport.gitHttp env actor repo tracker suffix request send
   _ -> notFound "route not found"
  where
+  -- Git's credential helper only retries when challenged, so 401s raised on
+  -- the transport routes carry the Basic header the API routes omit.
+  withChallenge action =
+    action `catch` \err@(AppError status message) ->
+      if status == status401
+        then send $ challengeResponse gitChallenge status message
+        else throwIO err
   route methods action
     | requestMethod request `elem` methods = action
     | otherwise =
@@ -94,15 +115,66 @@ dispatch env request send = case pathInfo request of
           jsonResponse status405 [(hAllow, B8.intercalate ", " methods)] $
             object ["error" .= object ["status" .= (405 :: Int), "message" .= ("method not allowed" :: Text)]]
   api actor = \case
+    ["me"] -> route [methodGet] $ do
+      noQuery request
+      user <- authenticated actor
+      identities <- Repository.listIdentities env user
+      send $
+        jsonResponse status200 [] $
+          object
+            [ "user" .= user
+            , "identities" .= [i | i <- identities, identityUser i == actorId user]
+            ]
+    ["tokens"] -> route [methodGet, methodPost] $ do
+      noQuery request
+      user <- authenticated actor
+      if requestMethod request == methodGet
+        then do
+          tokens <- Repository.listTokens env user
+          send $ jsonResponse status200 [] $ object ["tokens" .= tokens]
+        else do
+          confirmIntent request
+          body <- jsonBody request standardLimit >>= closedObject ["label"]
+          label <- textField "label" body
+          (secret, info) <- Repository.createToken env user label
+          -- The only time the secret is ever transmitted.
+          send $ jsonResponse status201 [] $ object ["token" .= info, "secret" .= secret]
+    ["tokens", ident] -> route [methodDelete] $ do
+      noQuery request
+      user <- authenticated actor
+      confirmIntent request
+      Repository.revokeToken env user ident
+      send $ responseLBS status204 [] ""
+    ["identities"] -> route [methodGet, methodPost] $ do
+      noQuery request
+      user <- authenticated actor
+      if requestMethod request == methodGet
+        then do
+          identities <- Repository.listIdentities env user
+          send $ jsonResponse status200 [] $ object ["identities" .= identities]
+        else do
+          confirmIntent request
+          body <- jsonBody request standardLimit >>= closedObject ["provider", "subject", "user"]
+          provider <- textField "provider" body
+          subject <- textField "subject" body
+          target <- textField "user" body
+          info <- Repository.linkIdentity env user provider subject target
+          send $ jsonResponse status201 [] $ object ["identity" .= info]
+    ["identities", provider, subject] -> route [methodDelete] $ do
+      noQuery request
+      user <- authenticated actor
+      confirmIntent request
+      Repository.unlinkIdentity env user provider subject
+      send $ responseLBS status204 [] ""
     ["users"] -> route [methodPost] $ do
       noQuery request
       user <- authenticated actor
       unless (actorAdmin user) $ forbidden "administrator access required"
-      body <- jsonBody request standardLimit >>= closedObject ["name", "token"]
+      confirmIntent request
+      body <- jsonBody request standardLimit >>= closedObject ["name"]
       name <- textField "name" body
-      token <- textField "token" body
-      created <- Repository.createUser env user name token
-      send $ jsonResponse status201 [] $ object ["user" .= created]
+      (created, secret, info) <- Repository.createUser env user name
+      send $ jsonResponse status201 [] $ object ["user" .= created, "token" .= info, "secret" .= secret]
     ["repos"] -> route [methodGet, methodPost] $ do
       noQuery request
       if requestMethod request == methodGet
@@ -350,6 +422,47 @@ authenticate env request = case [value | (name, value) <- requestHeaders request
   lowerAscii c
     | isAsciiUpper c = toEnum (fromEnum c + 32)
     | otherwise = c
+
+-- API routes accept a proxy-asserted identity in addition to a bearer token.
+-- Git transport deliberately does not: a browser would attach ambient proxy
+-- headers to those URLs, widening the credential surface for no benefit.
+apiAuthenticate :: Env -> Request -> IO (Maybe Actor)
+apiAuthenticate env request = case envForwardAuth env of
+  Nothing -> authenticate env request
+  Just forward -> do
+    asserted <- forwardActor env forward request
+    maybe (authenticate env request) (pure . Just) asserted
+
+-- The asserted header is only trusted from a loopback peer. Combined with the
+-- startup check that refuses a non-loopback bind, a remote client cannot reach
+-- this code path at all; the guard makes that independent of configuration.
+forwardActor :: Env -> ForwardAuth -> Request -> IO (Maybe Actor)
+forwardActor env forward request
+  | not (loopbackPeer (remoteHost request)) = pure Nothing
+  | otherwise = case [value | (name, value) <- requestHeaders request, name == forwardHeader forward] of
+      [] -> pure Nothing
+      [raw] -> do
+        subject <- utf8 raw
+        let trimmed = T.strip subject
+        if T.null trimmed
+          then pure Nothing
+          else
+            Repository.lookupIdentity env (forwardProvider forward) trimmed
+              >>= maybe (throwIO $ AppError status403 "identity is not permitted") (pure . Just)
+      -- Multiple values mean an upstream failed to strip a client-supplied
+      -- header; refusing is the only safe reading.
+      _ -> throwIO $ AppError status403 "ambiguous forwarded identity"
+
+loopbackPeer :: SockAddr -> Bool
+loopbackPeer = \case
+  SockAddrInet _ host -> host == tupleToHostAddress (127, 0, 0, 1)
+  SockAddrInet6 _ _ host _ -> host == (0, 0, 0, 1)
+  SockAddrUnix _ -> True
+
+confirmIntent :: Request -> IO ()
+confirmIntent request =
+  unless (any ((== "x-chilin-intent") . fst) (requestHeaders request)) $
+    forbidden "X-Chilin-Intent header required"
 
 unauthorized :: IO a
 unauthorized = throwIO $ AppError status401 "authentication required"
