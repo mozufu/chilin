@@ -1,6 +1,22 @@
-import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 import { ApiError, mutate, request, type MutationOutcome } from "./client";
-import type { IdentityInfo, Item, Me, Repository, TokenInfo } from "./types";
+import type {
+  IdentityInfo,
+  Item,
+  Kind,
+  Me,
+  MilestoneProgress,
+  Repository,
+  State,
+  TimelineEvent,
+  TokenInfo,
+} from "./types";
 
 export const keys = {
   me: ["me"] as const,
@@ -8,10 +24,17 @@ export const keys = {
   identities: ["identities"] as const,
   repos: ["repos"] as const,
   repo: (owner: string, name: string) => ["repo", owner, name] as const,
-  items: (owner: string, name: string, filters: ItemFilters) => ["items", owner, name, filters] as const,
+  items: (owner: string, name: string, filters: ItemFilters) =>
+    ["items", owner, name, filters] as const,
+  item: (owner: string, name: string, id: string) => ["item", owner, name, id] as const,
+  timeline: (owner: string, name: string, id: string) => ["timeline", owner, name, id] as const,
+  progress: (owner: string, name: string, id: string) => ["progress", owner, name, id] as const,
 };
 
-export type ItemFilters = { kind?: string; state?: string };
+export type ItemFilters = { kind?: Kind; state?: State };
+
+const repoPath = (owner: string, name: string) =>
+  `/api/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
 
 export const useMe = () =>
   useQuery({
@@ -60,8 +83,69 @@ export const useRepository = (owner: string, name: string) =>
         revision: string;
         files: Record<string, string>;
         items: Item[];
-      }>(`/api/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`);
+      }>(repoPath(owner, name));
       return { repository: value.repository, revision: value.revision, items: value.items };
+    },
+  });
+
+/**
+ * Paged item listing.
+ *
+ * The list deliberately targets /items rather than /issues: the server's
+ * collection filter only recognises issues (issue plus bug), milestones and
+ * pulls, so epic, task and followup items are reachable nowhere else.
+ *
+ * A cursor pins the tracker revision it was produced from, which is what makes
+ * paging stable while other writers advance the tracker.
+ */
+export const useItems = (owner: string, name: string, filters: ItemFilters) =>
+  useInfiniteQuery({
+    queryKey: keys.items(owner, name, filters),
+    initialPageParam: null as string | null,
+    queryFn: async ({ pageParam }) => {
+      const query = new URLSearchParams({ limit: "50" });
+      if (filters.kind !== undefined) query.set("kind", filters.kind);
+      if (filters.state !== undefined) query.set("state", filters.state);
+      if (pageParam !== null) query.set("cursor", pageParam);
+      const { value } = await request<{
+        revision: string;
+        data: { items: Item[]; next_cursor: string | null };
+      }>(`${repoPath(owner, name)}/items?${query.toString()}`);
+      return value;
+    },
+    getNextPageParam: (last) => last.data.next_cursor,
+  });
+
+export const useItem = (owner: string, name: string, id: string) =>
+  useQuery({
+    queryKey: keys.item(owner, name, id),
+    queryFn: async () => {
+      const { value } = await request<{ revision: string; data: Item }>(
+        `${repoPath(owner, name)}/items/${encodeURIComponent(id)}`,
+      );
+      return value.data;
+    },
+  });
+
+export const useTimeline = (owner: string, name: string, id: string) =>
+  useQuery({
+    queryKey: keys.timeline(owner, name, id),
+    queryFn: async () => {
+      const { value } = await request<{ revision: string; data: { events: TimelineEvent[] } }>(
+        `${repoPath(owner, name)}/items/${encodeURIComponent(id)}/timeline`,
+      );
+      return value.data.events;
+    },
+  });
+
+export const useMilestoneProgress = (owner: string, name: string, id: string) =>
+  useQuery({
+    queryKey: keys.progress(owner, name, id),
+    queryFn: async () => {
+      const { value } = await request<{ revision: string; data: MilestoneProgress }>(
+        `${repoPath(owner, name)}/milestones/${encodeURIComponent(id)}/progress`,
+      );
+      return value.data;
     },
   });
 
@@ -138,8 +222,11 @@ export const useTrackerMutation = <TVariables, TResult>(
       client.setQueryData<RepoSnapshot>(keys.repo(config.owner, config.name), (previous) =>
         previous === undefined ? previous : { ...previous, revision: outcome.revision },
       );
-      void client.invalidateQueries({ queryKey: keys.repo(config.owner, config.name) });
-      void client.invalidateQueries({ queryKey: ["items", config.owner, config.name] });
+      // Any tracker write can change item content, membership and history, so
+      // every read derived from the tracker is dropped rather than guessed at.
+      for (const prefix of ["repo", "items", "item", "timeline", "progress"]) {
+        void client.invalidateQueries({ queryKey: [prefix, config.owner, config.name] });
+      }
     },
   });
 };

@@ -2,9 +2,11 @@ import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ApiError, setBearer } from "../api/client";
 import { useMe } from "../api/queries";
+import type { Repository } from "../api/types";
 import { Login } from "./Login";
 import { Repositories } from "./Repositories";
 import { Tokens } from "./Tokens";
+import { Workspace } from "./tracker/Workspace";
 import { ErrorNotice, Spinner } from "./ui";
 
 type Tab = "repositories" | "tokens";
@@ -13,6 +15,7 @@ export const App = () => {
   const client = useQueryClient();
   const me = useMe();
   const [tab, setTab] = useState<Tab>("repositories");
+  const [active, setActive] = useState<Repository | null>(null);
 
   if (me.isPending) {
     return (
@@ -49,7 +52,10 @@ export const App = () => {
               <button
                 key={entry}
                 type="button"
-                onClick={() => setTab(entry)}
+                onClick={() => {
+                  setTab(entry);
+                  setActive(null);
+                }}
                 className={`rounded-md px-2.5 py-1 text-xs capitalize transition ${
                   tab === entry
                     ? "bg-neutral-800 text-neutral-100"
@@ -85,7 +91,13 @@ export const App = () => {
       </header>
 
       <main className="flex-1 overflow-y-auto py-6">
-        {tab === "repositories" ? <Repositories me={me.data.user} /> : <Tokens />}
+        {tab === "tokens" ? (
+          <Tokens />
+        ) : active !== null ? (
+          <Workspace owner={active.owner} name={active.name} onClose={() => setActive(null)} />
+        ) : (
+          <Repositories me={me.data.user} onOpen={setActive} />
+        )}
       </main>
     </div>
   );

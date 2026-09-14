@@ -84,3 +84,49 @@ export type Me = { user: Actor; identities: IdentityInfo[] };
 export type Snapshot<T> = { revision: string; data: T };
 
 export type MutationEnvelope<T> = { revision: string; data: T; replayed: boolean };
+
+export type Comment = {
+  id: string;
+  item_id: string;
+  author: string;
+  body: string;
+  created_at: string;
+};
+
+/**
+ * One recorded mutation. Chilin has no comment listing endpoint: comments are
+ * recovered from `comment.created` events, so the timeline is the only
+ * complete view of a discussion.
+ */
+export type TimelineEvent = {
+  event_id: string;
+  operation_id: string;
+  sequence: number;
+  actor_id: string;
+  recorded_at: string;
+  base_revision: string;
+  type: string;
+  data: {
+    item_id?: string;
+    item_ids?: string[];
+    comment?: Comment;
+    previous_state?: State | null;
+    state?: State;
+    item?: Item;
+  };
+};
+
+export type MilestoneProgress = {
+  milestone_id: string;
+  total: number;
+  done: number;
+  cancelled: number;
+  remaining: number;
+};
+
+/**
+ * Relations myque stores on an item. Only `parent` and `depends` are writable
+ * through PATCH (Chilin.Items.updateItem); the rest arrive via /imports and
+ * are presented read-only.
+ */
+export const WRITABLE_RELATIONS = ["parent", "depends"] as const;

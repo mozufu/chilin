@@ -34,7 +34,13 @@ const CloneHints = ({ repo }: { repo: Repository }) => {
   );
 };
 
-export const Repositories = ({ me }: { me: Actor }) => {
+export const Repositories = ({
+  me,
+  onOpen,
+}: {
+  me: Actor;
+  onOpen: (repo: Repository) => void;
+}) => {
   const client = useQueryClient();
   const repositories = useRepositories();
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -71,13 +77,17 @@ export const Repositories = ({ me }: { me: Actor }) => {
               {repositories.data.map((repo) => (
                 <li key={repo.id} className="py-3">
                   <div className="flex items-center justify-between gap-4">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm text-neutral-200">
+                    <button
+                      type="button"
+                      onClick={() => onOpen(repo)}
+                      className="min-w-0 flex-1 text-left"
+                    >
+                      <p className="truncate text-sm text-neutral-200 hover:text-white">
                         <span className="text-neutral-500">{repo.owner}/</span>
                         {repo.name}
                       </p>
                       <p className="text-xs text-neutral-600">{repo.public ? "public" : "private"}</p>
-                    </div>
+                    </button>
                     <Button onClick={() => setExpanded(expanded === repo.id ? null : repo.id)}>
                       {expanded === repo.id ? "Hide" : "Clone"}
                     </Button>
