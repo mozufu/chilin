@@ -214,21 +214,37 @@ dispatch env request send = case pathInfo request of
             , "files" .= snapshotFiles snapshot
             , "items" .= views
             ]
-    ["permissions"] -> route [methodPost] $ do
+    ["permissions"] -> route [methodGet, methodPost] $ do
       noQuery request
       user <- authenticated actor
       Repository.requireAccess env actor repo AdminAccess
-      body <- jsonBody request standardLimit >>= closedObject ["user", "access"]
-      target <- textField "user" body
-      access <-
-        textField "access" body >>= \case
-          "read" -> pure ReadAccess
-          "write" -> pure WriteAccess
-          "admin" -> pure AdminAccess
-          _ -> badRequest "access must be read, write, or admin"
-      Pulls.recoverRepo env repo
-      Repository.grantAccess env user repo target access
-      send $ jsonResponse status200 [] $ object ["user" .= target, "access" .= accessText access]
+      if requestMethod request == methodGet
+        then do
+          grants <- Repository.listPermissions env repo
+          send $
+            jsonResponse status200 [] $
+              object
+                [ "permissions"
+                    .= [object ["user" .= name, "access" .= accessText access] | (name, access) <- grants]
+                ]
+        else do
+          body <- jsonBody request standardLimit >>= closedObject ["user", "access"]
+          target <- textField "user" body
+          access <-
+            textField "access" body >>= \case
+              "read" -> pure ReadAccess
+              "write" -> pure WriteAccess
+              "admin" -> pure AdminAccess
+              _ -> badRequest "access must be read, write, or admin"
+          Pulls.recoverRepo env repo
+          Repository.grantAccess env user repo target access
+          send $ jsonResponse status200 [] $ object ["user" .= target, "access" .= accessText access]
+    ["permissions", target] -> route [methodDelete] $ do
+      noQuery request
+      user <- authenticated actor
+      Repository.requireAccess env actor repo AdminAccess
+      Repository.revokeAccess env user repo target
+      send $ responseLBS status204 [] ""
     ["imports"] ->
       route [methodPost] $
         mutate actor repo importLimit (Items.importItems env repo)

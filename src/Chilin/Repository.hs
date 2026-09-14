@@ -16,6 +16,8 @@ module Chilin.Repository
   , lookupRepo
   , requireAccess
   , grantAccess
+  , listPermissions
+  , revokeAccess
   , allRepos
   , actorExists
   ) where
@@ -370,3 +372,35 @@ grantAccess env actor repo user access = withRepoLock env repo $ do
     users <- query db "SELECT name FROM users WHERE name=?" (Only user) :: IO [Only Text]
     when (null users) $ notFound "User does not exist"
     execute db "INSERT INTO permissions(repo_id,user_name,access) VALUES (?,?,?) ON CONFLICT(repo_id,user_name) DO UPDATE SET access=excluded.access" (repoId repo, user, accessRank access)
+
+accessFromRank :: Int -> IO Access
+accessFromRank 0 = pure ReadAccess
+accessFromRank 1 = pure WriteAccess
+accessFromRank 2 = pure AdminAccess
+accessFromRank _ = throwIO (AppError status500 "Invalid access rank in registry")
+
+-- The owner holds implicit administrative access and has no permissions row,
+-- so it is reported explicitly; otherwise the list would suggest a repository
+-- with no administrator.
+listPermissions :: Env -> Repo -> IO [(Text, Access)]
+listPermissions env repo = withMVar (envDatabase env) $ \db -> do
+  rows <-
+    query
+      db
+      "SELECT user_name,access FROM permissions WHERE repo_id=? ORDER BY user_name"
+      (Only (repoId repo))
+      :: IO [(Text, Int)]
+  granted <- traverse (\(user, rank) -> (,) user <$> accessFromRank rank) rows
+  pure ((repoOwner repo, AdminAccess) : filter ((/= repoOwner repo) . fst) granted)
+
+-- The owner's access is structural, not a grant, so there is no row to delete
+-- and removing it would leave the repository unadministrable.
+revokeAccess :: Env -> Actor -> Repo -> Text -> IO ()
+revokeAccess env actor repo user = withRepoLock env repo $ do
+  requireAccess env (Just actor) repo AdminAccess
+  validateName user
+  when (user == repoOwner repo) $ conflict "The repository owner's access cannot be revoked"
+  withMVar (envDatabase env) $ \db -> do
+    rows <- query db "SELECT user_name FROM permissions WHERE repo_id=? AND user_name=?" (repoId repo, user) :: IO [Only Text]
+    when (null rows) $ notFound "User has no access to this repository"
+    execute db "DELETE FROM permissions WHERE repo_id=? AND user_name=?" (repoId repo, user)

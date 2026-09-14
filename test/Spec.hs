@@ -202,3 +202,21 @@ main = hspec $ do
       case body of
         Just (Object fields) -> KM.member "secret" fields `shouldBe` True
         _ -> expectationFailure "expected a credential document"
+
+  describe "repository access" $ do
+    it "reports the owner as an administrator without a grant row" $ withRepository $ \env _ repo -> do
+      -- createRepo writes no permissions row for the owner, so an owner
+      -- omitted here would look like a repository nobody can administer.
+      listPermissions env repo `shouldReturn` [("alice", AdminAccess)]
+
+    it "lists a grant and stops listing it after revocation" $ withRepository $ \env actor repo -> do
+      (bob, _, _) <- createUser env actor "bob"
+      grantAccess env actor repo (actorId bob) WriteAccess
+      listPermissions env repo `shouldReturn` [("alice", AdminAccess), ("bob", WriteAccess)]
+      revokeAccess env actor repo "bob"
+      listPermissions env repo `shouldReturn` [("alice", AdminAccess)]
+
+    it "refuses to revoke the owner, who would otherwise lose administration" $ withRepository $ \env actor repo -> do
+      outcome <- try (revokeAccess env actor repo "alice") :: IO (Either AppError ())
+      outcome `shouldSatisfy` either (const True) (const False)
+      listPermissions env repo `shouldReturn` [("alice", AdminAccess)]
