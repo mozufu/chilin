@@ -53,9 +53,15 @@
             src = source;
             inherit (pkgs) git makeWrapper;
           };
+          web = pkgs.callPackage ./web { };
         in
         {
-          inherit pkgs hs chilin;
+          inherit
+            pkgs
+            hs
+            chilin
+            web
+            ;
         };
     in
     {
@@ -67,6 +73,7 @@
         {
           default = p.chilin;
           chilin = p.chilin;
+          web = p.web;
         }
       );
       apps = forAllSystems (system: {
@@ -98,6 +105,8 @@
               p.hs.fourmolu
               p.hs.hlint
               p.hs.cabal-fmt
+              nodejs_22
+              pnpm
             ];
             CHILIN_GIT = "${p.pkgs.git}/bin/git";
           };
