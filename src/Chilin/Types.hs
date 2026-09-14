@@ -25,6 +25,9 @@ data Env = Env
   , envDatabase :: MVar Connection
   , envLocks :: MVar (Map Text (MVar ()))
   , envForwardAuth :: Maybe ForwardAuth
+  , -- Advertised in /api/me so the UI can print a working SSH remote; the SSH
+    -- endpoint need not share the web origin's host or port.
+    envSshHost :: Maybe Text
   }
 
 data Actor = Actor

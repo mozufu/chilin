@@ -27,7 +27,7 @@ import Test.Hspec
 
 withRegistry :: Maybe ForwardAuth -> (Env -> IO a) -> IO a
 withRegistry forward action = withSystemTempDirectory "chilin-test" $ \root -> do
-  env <- openEnvWith root forward
+  env <- openEnvWith root forward Nothing
   bootstrapAdmin env "alice" "alice-test-token-at-least-thirty-two-characters"
   action env
 

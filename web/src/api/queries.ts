@@ -14,6 +14,7 @@ import type {
   MilestoneProgress,
   Repository,
   State,
+  SshKeyInfo,
   TimelineEvent,
   TokenInfo,
 } from "./types";
@@ -38,6 +39,7 @@ const historyQuery = (history: History): Record<string, string> => {
 export const keys = {
   me: ["me"] as const,
   tokens: ["tokens"] as const,
+  sshKeys: ["ssh-keys"] as const,
   identities: ["identities"] as const,
   repos: ["repos"] as const,
   permissions: (owner: string, name: string) => ["permissions", owner, name] as const,
@@ -71,6 +73,12 @@ export const useTokens = () =>
   useQuery({
     queryKey: keys.tokens,
     queryFn: async () => (await request<{ tokens: TokenInfo[] }>("/api/tokens")).value.tokens,
+  });
+
+export const useSshKeys = () =>
+  useQuery({
+    queryKey: keys.sshKeys,
+    queryFn: async () => (await request<{ keys: SshKeyInfo[] }>("/api/ssh-keys")).value.keys,
   });
 
 export const useIdentities = () =>

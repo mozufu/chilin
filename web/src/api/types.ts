@@ -8,6 +8,8 @@ export type Repository = { id: string; owner: string; name: string; public: bool
 
 export type TokenInfo = { id: string; label: string; created_at: string };
 
+export type SshKeyInfo = { id: string; label: string; fingerprint: string; created_at: string };
+
 export type IdentityInfo = { provider: string; subject: string; user: string };
 
 // Myque.Item enumerations, in schema order.
@@ -78,7 +80,7 @@ export type Item = {
   milestone?: { item_id: string; due_at: string | null };
 };
 
-export type Me = { user: Actor; identities: IdentityInfo[] };
+export type Me = { user: Actor; identities: IdentityInfo[]; ssh_host: string | null };
 
 /** Every read response carries the tracker revision it was computed from. */
 export type Snapshot<T> = { revision: string; data: T };

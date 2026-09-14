@@ -43,7 +43,7 @@ run ("init" : args) = do
   bootstrapAdmin env (T.pack admin) (T.pack token)
   putStrLn ("Initialized Chilin storage for " <> admin)
 run ("serve" : args) = do
-  options <- parseOptions ["--root", "--host", "--port", "--forward-auth-header", "--forward-auth-provider"] args
+  options <- parseOptions ["--root", "--host", "--port", "--forward-auth-header", "--forward-auth-provider", "--ssh-host"] args
   let root = option "--root" "data" options
       host = option "--host" "127.0.0.1" options
       provider = option "--forward-auth-provider" "github" options
@@ -58,7 +58,7 @@ run ("serve" : args) = do
         die "--forward-auth-header requires --host 127.0.0.1 or ::1; a reachable listener lets clients forge the identity header"
       when (null raw) $ die "--forward-auth-header must not be empty"
       pure (Just (ForwardAuth (CI.mk (B8.pack raw)) (T.pack provider)))
-  env <- openEnvWith root forward
+  env <- openEnvWith root forward (T.pack <$> lookup "--ssh-host" options)
   putStrLn ("Chilin listening on " <> host <> ":" <> show port)
   case forward of
     Just f -> putStrLn ("Trusting loopback header " <> header f <> " as provider " <> provider)
@@ -153,13 +153,18 @@ usage =
     , "  Reads a >=32-character administrator token from CHILIN_ADMIN_TOKEN."
     , "chilin serve [--root data] [--host 127.0.0.1] [--port 8080]"
     , "             [--forward-auth-header X-Forwarded-User] [--forward-auth-provider github]"
+    , "             [--ssh-host git@example.com]"
     , "  Forward auth trusts the named header only from loopback peers and only"
     , "  for subjects already linked via /api/identities; it requires a loopback --host."
+    , "  --ssh-host is advertised to the web UI as the SSH remote to clone from."
     , "chilin link [--root data] [--provider github] --subject <id> --user <name>"
     , "  Links a forward-auth subject to an existing user without going through"
     , "  the API; idempotent, for provisioning the first operator identity."
-    , "chilin ssh [--root data]"
-    , "  Restricted SSH forced command; CHILIN_TOKEN and SSH_ORIGINAL_COMMAND required."
+    , "chilin ssh-key [--root data] --fingerprint <SHA256:...> --self <path>"
+    , "  sshd AuthorizedKeysCommand; prints an authorized_keys line for the key."
+    , "chilin ssh [--root data] [--fingerprint <SHA256:...>]"
+    , "  Restricted SSH forced command; SSH_ORIGINAL_COMMAND required. Without"
+    , "  --fingerprint the caller is identified by CHILIN_TOKEN instead."
     , ""
     , "Git: /owner/repo.git and read-only /owner/repo.tracker.git"
     , "API: /api/repos; authenticate using Bearer token or HTTP Basic password token."

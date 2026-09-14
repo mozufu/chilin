@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { keys, useCredentialMutation, useTokens } from "../api/queries";
-import type { TokenInfo } from "../api/types";
+import { keys, useCredentialMutation, useSshKeys, useTokens } from "../api/queries";
+import type { SshKeyInfo, TokenInfo } from "../api/types";
 import { Button, Empty, ErrorNotice, Field, Panel, Spinner, inputClass } from "./ui";
 
 type Created = { token: TokenInfo; secret: string };
@@ -113,6 +113,104 @@ export const Tokens = () => {
           </div>
         )}
       </Panel>
+
+      <SshKeys />
     </div>
+  );
+};
+
+
+/**
+ * SSH key administration. Unlike a token, a public key is not a secret, so it
+ * is shown in full and the server reports the fingerprint it derived — the
+ * same value `ssh-keygen -lf` prints, so a user can confirm they registered
+ * the key they meant to.
+ */
+const SshKeys = () => {
+  const sshKeys = useSshKeys();
+  const [label, setLabel] = useState("");
+  const [key, setKey] = useState("");
+
+  const add = useCredentialMutation<{ label: string; key: string }, { key: SshKeyInfo }>(
+    (variables) => ({ path: "/api/ssh-keys", method: "POST", body: variables }),
+    keys.sshKeys,
+  );
+
+  const remove = useCredentialMutation<{ id: string }, void>(
+    (variables) => ({ path: `/api/ssh-keys/${encodeURIComponent(variables.id)}`, method: "DELETE" }),
+    keys.sshKeys,
+  );
+
+  return (
+    <Panel title="SSH keys" description="Public keys allowed to clone and push over SSH">
+      {sshKeys.isPending && <Spinner label="Loading SSH keys" />}
+      {sshKeys.error !== null && <ErrorNotice error={sshKeys.error} />}
+      {sshKeys.data !== undefined &&
+        (sshKeys.data.length === 0 ? (
+          <Empty>No SSH keys.</Empty>
+        ) : (
+          <ul className="divide-y divide-neutral-800">
+            {sshKeys.data.map((entry) => (
+              <li key={entry.id} className="flex items-center justify-between gap-4 py-2.5">
+                <div className="min-w-0">
+                  <p className="truncate text-sm text-neutral-200">{entry.label}</p>
+                  <p className="truncate font-mono text-xs text-neutral-600">
+                    {entry.fingerprint} · added {entry.created_at}
+                  </p>
+                </div>
+                <Button variant="danger" disabled={remove.isPending} onClick={() => remove.mutate({ id: entry.id })}>
+                  Remove
+                </Button>
+              </li>
+            ))}
+          </ul>
+        ))}
+      {remove.error !== null && (
+        <div className="mt-3">
+          <ErrorNotice error={remove.error} />
+        </div>
+      )}
+
+      <form
+        className="mt-4 space-y-3 border-t border-neutral-800 pt-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          add.mutate(
+            { label: label.trim(), key: key.trim() },
+            {
+              onSuccess: () => {
+                setLabel("");
+                setKey("");
+              },
+            },
+          );
+        }}
+      >
+        <Field label="Label" hint="which machine this key lives on">
+          <input
+            className={inputClass}
+            value={label}
+            onChange={(event) => setLabel(event.target.value)}
+            placeholder="laptop"
+          />
+        </Field>
+        <Field label="Public key" hint="contents of ~/.ssh/id_ed25519.pub">
+          <textarea
+            className={`${inputClass} h-24 font-mono text-xs`}
+            value={key}
+            onChange={(event) => setKey(event.target.value)}
+            placeholder="ssh-ed25519 AAAAC3Nz… you@laptop"
+          />
+        </Field>
+        {add.error !== null && <ErrorNotice error={add.error} />}
+        <Button
+          type="submit"
+          variant="primary"
+          disabled={add.isPending || label.trim().length === 0 || key.trim().length === 0}
+        >
+          {add.isPending ? "Adding…" : "Add SSH key"}
+        </Button>
+      </form>
+    </Panel>
   );
 };

@@ -5,18 +5,22 @@ import { keys, useRepositories } from "../api/queries";
 import type { Actor, Repository } from "../api/types";
 import { Button, Empty, ErrorNotice, Field, Panel, Spinner, inputClass } from "./ui";
 
-const CloneHints = ({ repo }: { repo: Repository }) => {
+const CloneHints = ({ repo, sshHost }: { repo: Repository; sshHost: string | null }) => {
   const origin = window.location.origin;
   const http = `${origin}/${repo.owner}/${repo.name}.git`;
   // The tracker is exposed as a second, read-only repository holding the
   // canonical collaboration state.
   const tracker = `${origin}/${repo.owner}/${repo.name}.tracker.git`;
+  const remotes = [
+    { label: "Clone", value: `git clone ${http}` },
+    // Only offered when the server advertises an SSH endpoint: it need not
+    // share the web origin, so guessing one would print a broken remote.
+    ...(sshHost === null ? [] : [{ label: "Clone over SSH", value: `git clone ssh://${sshHost}/${repo.owner}/${repo.name}.git` }]),
+    { label: "Tracker (read-only)", value: `git clone ${tracker}` },
+  ];
   return (
     <div className="mt-3 space-y-2 border-t border-neutral-800 pt-3">
-      {[
-        { label: "Clone", value: `git clone ${http}` },
-        { label: "Tracker (read-only)", value: `git clone ${tracker}` },
-      ].map((entry) => (
+      {remotes.map((entry) => (
         <div key={entry.label}>
           <p className="text-xs text-neutral-500">{entry.label}</p>
           <div className="mt-1 flex items-center gap-2">
@@ -29,6 +33,7 @@ const CloneHints = ({ repo }: { repo: Repository }) => {
       ))}
       <p className="text-xs text-neutral-600">
         Authenticate with a token as the HTTP password; the username is ignored.
+        {sshHost !== null && " SSH uses the public keys registered under Tokens."}
       </p>
     </div>
   );
@@ -36,9 +41,11 @@ const CloneHints = ({ repo }: { repo: Repository }) => {
 
 export const Repositories = ({
   me,
+  sshHost,
   onOpen,
 }: {
   me: Actor;
+  sshHost: string | null;
   onOpen: (repo: Repository) => void;
 }) => {
   const client = useQueryClient();
@@ -92,7 +99,7 @@ export const Repositories = ({
                       {expanded === repo.id ? "Hide" : "Clone"}
                     </Button>
                   </div>
-                  {expanded === repo.id && <CloneHints repo={repo} />}
+                  {expanded === repo.id && <CloneHints repo={repo} sshHost={sshHost} />}
                 </li>
               ))}
             </ul>

@@ -55,10 +55,10 @@ import System.FilePath ((</>))
 import System.Posix.Files (setFileMode)
 
 openEnv :: FilePath -> IO Env
-openEnv root = openEnvWith root Nothing
+openEnv root = openEnvWith root Nothing Nothing
 
-openEnvWith :: FilePath -> Maybe ForwardAuth -> IO Env
-openEnvWith root forward = do
+openEnvWith :: FilePath -> Maybe ForwardAuth -> Maybe Text -> IO Env
+openEnvWith root forward sshHost = do
   -- myque's public filesystem loader uses the process text encoding.
   setLocaleEncoding utf8
   createDirectoryIfMissing True root
@@ -93,7 +93,7 @@ openEnvWith root forward = do
       execute_ db "CREATE UNIQUE INDEX IF NOT EXISTS tokens_id ON tokens(id)"
     unless (present "label") $ execute_ db "ALTER TABLE tokens ADD COLUMN label TEXT NOT NULL DEFAULT 'legacy'"
     unless (present "created_at") $ execute_ db "ALTER TABLE tokens ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"
-  Env absolute git <$> newMVar db <*> newMVar Map.empty <*> pure forward
+  Env absolute git <$> newMVar db <*> newMVar Map.empty <*> pure forward <*> pure sshHost
 
 validateName :: Text -> IO ()
 validateName name = unless (not (T.null name) && T.length name <= 100 && T.all allowed name && name /= "." && name /= "..") $ badRequest "Names must contain 1..100 ASCII letters, digits, hyphens, underscores or dots"

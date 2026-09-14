@@ -101,7 +101,7 @@ export const App = () => {
             onClose={() => setActive(null)}
           />
         ) : (
-          <Repositories me={me.data.user} onOpen={setActive} />
+          <Repositories me={me.data.user} sshHost={me.data.ssh_host} onOpen={setActive} />
         )}
       </main>
     </div>

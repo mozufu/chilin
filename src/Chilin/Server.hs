@@ -124,6 +124,7 @@ dispatch env request send = case pathInfo request of
           object
             [ "user" .= user
             , "identities" .= [i | i <- identities, identityUser i == actorId user]
+            , "ssh_host" .= envSshHost env
             ]
     ["tokens"] -> route [methodGet, methodPost] $ do
       noQuery request
