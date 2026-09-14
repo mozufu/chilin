@@ -53,6 +53,26 @@ data TokenInfo = TokenInfo
 instance ToJSON TokenInfo where
   toJSON t = object ["id" .= tokenInfoId t, "label" .= tokenInfoLabel t, "created_at" .= tokenInfoCreatedAt t]
 
+-- A public key authorised to act as a user over SSH. The fingerprint is the
+-- lookup key sshd hands back via AuthorizedKeysCommand, so it is stored in
+-- OpenSSH's own "SHA256:base64" spelling rather than a private encoding.
+data SshKeyInfo = SshKeyInfo
+  { sshKeyId :: Text
+  , sshKeyLabel :: Text
+  , sshKeyFingerprint :: Text
+  , sshKeyCreatedAt :: Text
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON SshKeyInfo where
+  toJSON k =
+    object
+      [ "id" .= sshKeyId k
+      , "label" .= sshKeyLabel k
+      , "fingerprint" .= sshKeyFingerprint k
+      , "created_at" .= sshKeyCreatedAt k
+      ]
+
 -- An external identity permitted to assume a chilin account. Presence in this
 -- table is the allowlist: proxy-asserted subjects without a row are rejected.
 data IdentityInfo = IdentityInfo

@@ -65,6 +65,7 @@ executable chilin
     , bytestring
     , case-insensitive
     , chilin
+    , directory
     , http-types
     , text
 

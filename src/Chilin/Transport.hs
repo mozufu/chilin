@@ -2,7 +2,7 @@ module Chilin.Transport (gitHttp, runSSH) where
 
 import Chilin.Git (codePath, trackerPath, withRepoLock)
 import Chilin.Pulls (recoverRepoLocked)
-import Chilin.Repository (lookupActor, lookupRepo, requireAccess)
+import Chilin.Repository (lookupRepo, requireAccess)
 import Chilin.Types
 import Control.Concurrent.Async (concurrently, concurrently_, link, wait, withAsync)
 import Control.Exception (IOException, catch, throwIO)
@@ -216,9 +216,10 @@ copyBounded limit source destination = go 0
       hFlush destination
       go total
 
-runSSH :: Env -> Text -> Text -> IO ()
-runSSH env token command = do
-  actor <- lookupActor env token >>= maybe (throwIO (AppError status401 "Invalid SSH credential")) pure
+-- The actor is resolved by the caller: over SSH the identity comes from the
+-- key sshd already verified, never from anything on the wire.
+runSSH :: Env -> Actor -> Text -> IO ()
+runSSH env actor command = do
   (receive, owner, name, tracker) <- parseCommand command
   repo <- lookupRepo env owner name
   when (receive && tracker) $ forbidden "Tracker Git repositories are read-only"

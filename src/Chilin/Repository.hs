@@ -12,6 +12,10 @@ module Chilin.Repository
   , listIdentities
   , linkIdentity
   , unlinkIdentity
+  , listSshKeys
+  , addSshKey
+  , removeSshKey
+  , lookupSshKey
   , createRepo
   , listRepos
   , lookupRepo
@@ -33,6 +37,7 @@ import Crypto.Hash (Digest, SHA256, hash)
 import Crypto.Random (getRandomBytes)
 import Data.ByteArray (constEq, convert)
 import Data.ByteString qualified as BS
+import Data.ByteString.Base64 qualified as B64
 import Data.Char (isAsciiLower, isAsciiUpper, isDigit)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -77,6 +82,9 @@ openEnvWith root forward = do
     -- are rejected. 'subject' is opaque, letting a provider migrate from a
     -- mutable login to a stable numeric id without a schema change.
     execute_ db "CREATE TABLE IF NOT EXISTS identities (provider TEXT NOT NULL, subject TEXT NOT NULL, user_name TEXT NOT NULL REFERENCES users(name) ON DELETE CASCADE, PRIMARY KEY(provider,subject))"
+    -- Fingerprint is the primary key: sshd looks a key up by fingerprint, and
+    -- the same key must never resolve to two accounts.
+    execute_ db "CREATE TABLE IF NOT EXISTS ssh_keys (fingerprint TEXT PRIMARY KEY, user_name TEXT NOT NULL REFERENCES users(name) ON DELETE CASCADE, id TEXT NOT NULL UNIQUE, label TEXT NOT NULL, algorithm TEXT NOT NULL, key_blob TEXT NOT NULL, created_at TEXT NOT NULL)"
     columns <- query_ db "SELECT name FROM pragma_table_info('tokens')" :: IO [Only Text]
     let present name = Only name `elem` columns
     unless (present "id") $ do
@@ -270,6 +278,96 @@ bootstrapIdentity env provider subject user = do
       [] -> execute db "INSERT INTO identities(provider,subject,user_name) VALUES (?,?,?)" (provider, subject, user)
       [Only owner] | owner == user -> pure ()
       _ -> conflict "Identity is already linked to a different user"
+
+-- An authorized_keys entry is "<algorithm> <base64 blob> [comment]". The blob
+-- re-declares its own algorithm in its first field; a mismatch means the entry
+-- is malformed or crafted, so it is rejected rather than normalised.
+parsePublicKey :: Text -> IO (Text, Text, Text)
+parsePublicKey raw = do
+  let stripped = T.strip raw
+  when (T.length stripped > 16384) $ badRequest "Public key is too large"
+  (algorithm, rest) <- case T.break (== ' ') stripped of
+    (a, r) | not (T.null a) && not (T.null r) -> pure (a, T.stripStart r)
+    _ -> badRequest "Public keys must be in authorized_keys format: <algorithm> <base64> [comment]"
+  let blob = T.takeWhile (/= ' ') rest
+  unless (algorithm `elem` supportedAlgorithms) $
+    badRequest ("Unsupported key algorithm; expected one of " <> T.intercalate ", " supportedAlgorithms)
+  decoded <- case B64.decode (TE.encodeUtf8 blob) of
+    Right bytes | not (BS.null bytes) -> pure bytes
+    _ -> badRequest "Public key body is not valid base64"
+  declared <- maybe (badRequest "Public key body is malformed") pure (sshString decoded)
+  unless (declared == TE.encodeUtf8 algorithm) $
+    badRequest "Public key body does not match its declared algorithm"
+  pure (algorithm, blob, fingerprintOf decoded)
+ where
+  -- DSA is omitted deliberately: OpenSSH rejects it by default, so accepting a
+  -- key here that can never authenticate would be a trap.
+  supportedAlgorithms =
+    [ "ssh-ed25519"
+    , "ssh-rsa"
+    , "ecdsa-sha2-nistp256"
+    , "ecdsa-sha2-nistp384"
+    , "ecdsa-sha2-nistp521"
+    , "sk-ssh-ed25519@openssh.com"
+    , "sk-ecdsa-sha2-nistp256@openssh.com"
+    ]
+
+-- SSH wire format prefixes each field with a 32-bit big-endian length.
+sshString :: BS.ByteString -> Maybe BS.ByteString
+sshString bytes = do
+  unless (BS.length bytes >= 4) Nothing
+  let len = foldl' (\acc i -> acc * 256 + fromIntegral (BS.index bytes i)) (0 :: Int) [0 .. 3]
+  unless (len > 0 && len <= BS.length bytes - 4) Nothing
+  pure (BS.take len (BS.drop 4 bytes))
+
+-- OpenSSH renders fingerprints as unpadded base64 of the SHA-256 digest.
+fingerprintOf :: BS.ByteString -> Text
+fingerprintOf decoded =
+  "SHA256:" <> T.dropWhileEnd (== '=') (TE.decodeUtf8 (B64.encode (convert (hash decoded :: Digest SHA256))))
+
+listSshKeys :: Env -> Actor -> IO [SshKeyInfo]
+listSshKeys env actor = withMVar (envDatabase env) $ \db -> do
+  rows <- query db "SELECT id,label,fingerprint,created_at FROM ssh_keys WHERE user_name=? ORDER BY created_at,id" (Only (actorId actor))
+  pure [SshKeyInfo ident label fingerprint createdAt | (ident, label, fingerprint, createdAt) <- rows]
+
+addSshKey :: Env -> Actor -> Text -> Text -> IO SshKeyInfo
+addSshKey env actor label raw = do
+  validateLabel label
+  (algorithm, blob, fingerprint) <- parsePublicKey raw
+  ident <- newTokenId
+  now <- timestamp
+  withMVar (envDatabase env) $ \db -> withTransaction db $ do
+    count <- query db "SELECT COUNT(*) FROM ssh_keys WHERE user_name=?" (Only (actorId actor)) :: IO [Only Int]
+    when (count >= [Only 64]) $ conflict "SSH key limit reached; remove an existing key first"
+    existing <- query db "SELECT user_name FROM ssh_keys WHERE fingerprint=?" (Only fingerprint) :: IO [Only Text]
+    -- Reusing a key across accounts would make the SSH identity ambiguous.
+    unless (null existing) $ conflict "This public key is already registered"
+    execute
+      db
+      "INSERT INTO ssh_keys(fingerprint,user_name,id,label,algorithm,key_blob,created_at) VALUES (?,?,?,?,?,?,?)"
+      (fingerprint, actorId actor, ident, label, algorithm, blob, now)
+    pure (SshKeyInfo ident label fingerprint now)
+
+-- Unlike tokens, the last key may be removed: HTTP token auth still works, so
+-- this cannot lock a user out.
+removeSshKey :: Env -> Actor -> Text -> IO ()
+removeSshKey env actor ident = withMVar (envDatabase env) $ \db -> withTransaction db $ do
+  rows <- query db "SELECT id FROM ssh_keys WHERE user_name=? AND id=?" (actorId actor, ident) :: IO [Only Text]
+  when (null rows) $ notFound "SSH key not found"
+  execute db "DELETE FROM ssh_keys WHERE user_name=? AND id=?" (actorId actor, ident)
+
+-- Resolves the account sshd should run the forced command as. The fingerprint
+-- comes from sshd itself, never from the client.
+lookupSshKey :: Env -> Text -> IO (Maybe (Actor, Text, Text))
+lookupSshKey env fingerprint = withMVar (envDatabase env) $ \db -> do
+  rows <-
+    query
+      db
+      "SELECT u.name,u.admin,k.algorithm,k.key_blob FROM ssh_keys k JOIN users u ON u.name=k.user_name WHERE k.fingerprint=?"
+      (Only fingerprint)
+  pure $ case rows of
+    [(name, admin, algorithm, blob)] -> Just (Actor name admin, algorithm, blob)
+    _ -> Nothing
 
 unlinkIdentity :: Env -> Actor -> Text -> Text -> IO ()
 unlinkIdentity env actor provider subject = do

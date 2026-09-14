@@ -64,6 +64,7 @@ mkDerivation {
   ];
   executableHaskellDepends = [
     base
+    directory
     http-types
     text
   ];

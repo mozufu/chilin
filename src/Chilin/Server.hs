@@ -145,6 +145,26 @@ dispatch env request send = case pathInfo request of
       confirmIntent request
       Repository.revokeToken env user ident
       send $ responseLBS status204 [] ""
+    ["ssh-keys"] -> route [methodGet, methodPost] $ do
+      noQuery request
+      user <- authenticated actor
+      if requestMethod request == methodGet
+        then do
+          keys <- Repository.listSshKeys env user
+          send $ jsonResponse status200 [] $ object ["keys" .= keys]
+        else do
+          confirmIntent request
+          body <- jsonBody request standardLimit >>= closedObject ["label", "key"]
+          label <- textField "label" body
+          key <- textField "key" body
+          info <- Repository.addSshKey env user label key
+          send $ jsonResponse status201 [] $ object ["key" .= info]
+    ["ssh-keys", ident] -> route [methodDelete] $ do
+      noQuery request
+      user <- authenticated actor
+      confirmIntent request
+      Repository.removeSshKey env user ident
+      send $ responseLBS status204 [] ""
     ["identities"] -> route [methodGet, methodPost] $ do
       noQuery request
       user <- authenticated actor
