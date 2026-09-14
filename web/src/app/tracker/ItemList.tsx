@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useItems, type ItemFilters } from "../../api/queries";
+import { useItems, type History, type ItemFilters } from "../../api/queries";
 import { KINDS, STATES, type Item, type Kind, type State } from "../../api/types";
 import { Button, Empty, ErrorNotice, Spinner } from "../ui";
 
@@ -44,14 +44,16 @@ const Chip = ({
 export const ItemList = ({
   owner,
   name,
+  history,
   onOpen,
 }: {
   owner: string;
   name: string;
+  history: History;
   onOpen: (id: string) => void;
 }) => {
   const [filters, setFilters] = useState<ItemFilters>({});
-  const query = useItems(owner, name, filters);
+  const query = useItems(owner, name, filters, history);
   const items = query.data?.pages.flatMap((page) => page.data.items) ?? [];
 
   const toggle = <K extends keyof ItemFilters>(field: K, value: ItemFilters[K]) =>

@@ -1,11 +1,23 @@
 import { useState } from "react";
-import { useItem, useTimeline, useTrackerMutation } from "../../api/queries";
+import { useItem, useTimeline, useTrackerMutation, type History } from "../../api/queries";
 import { STATES, type Item, type State } from "../../api/types";
 import { Button, ErrorNotice, Panel, Spinner } from "../ui";
 import { RelationGraph } from "./RelationGraph";
 
-const Discussion = ({ owner, name, id }: { owner: string; name: string; id: string }) => {
-  const timeline = useTimeline(owner, name, id);
+const Discussion = ({
+  owner,
+  name,
+  id,
+  history,
+  readOnly,
+}: {
+  owner: string;
+  name: string;
+  id: string;
+  history: History;
+  readOnly: boolean;
+}) => {
+  const timeline = useTimeline(owner, name, id, history);
   const [body, setBody] = useState("");
 
   const comment = useTrackerMutation<{ body: string }, unknown>({
@@ -56,25 +68,27 @@ const Discussion = ({ owner, name, id }: { owner: string; name: string; id: stri
         })}
       </ol>
 
-      <form
-        className="mt-4 space-y-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          comment.mutate({ body }, { onSuccess: () => setBody("") });
-        }}
-      >
-        <textarea
-          rows={3}
-          value={body}
-          onChange={(event) => setBody(event.target.value)}
-          placeholder="Leave a comment"
-          className="w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none placeholder:text-neutral-600 focus:border-sky-700"
-        />
-        {comment.error !== null && <ErrorNotice error={comment.error} />}
-        <Button type="submit" variant="primary" disabled={comment.isPending || body.trim().length === 0}>
-          {comment.isPending ? "Posting…" : "Comment"}
-        </Button>
-      </form>
+      {!readOnly && (
+        <form
+          className="mt-4 space-y-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            comment.mutate({ body }, { onSuccess: () => setBody("") });
+          }}
+        >
+          <textarea
+            rows={3}
+            value={body}
+            onChange={(event) => setBody(event.target.value)}
+            placeholder="Leave a comment"
+            className="w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none placeholder:text-neutral-600 focus:border-sky-700"
+          />
+          {comment.error !== null && <ErrorNotice error={comment.error} />}
+          <Button type="submit" variant="primary" disabled={comment.isPending || body.trim().length === 0}>
+            {comment.isPending ? "Posting…" : "Comment"}
+          </Button>
+        </form>
+      )}
     </Panel>
   );
 };
@@ -135,16 +149,19 @@ export const ItemDetail = ({
   owner,
   name,
   id,
+  history,
   onBack,
   onOpen,
 }: {
   owner: string;
   name: string;
   id: string;
+  history: History;
   onBack: () => void;
   onOpen: (id: string) => void;
 }) => {
-  const item = useItem(owner, name, id);
+  const item = useItem(owner, name, id, history);
+  const readOnly = history.at !== "now";
 
   if (item.isPending) return <Spinner label="Loading item" />;
   if (item.error !== null) return <ErrorNotice error={item.error} />;
@@ -180,13 +197,15 @@ export const ItemDetail = ({
           />
           <Row label="Tags" value={value.tags.length > 0 ? value.tags.join(", ") : "—"} />
         </dl>
-        <div className="mt-4 border-t border-neutral-800 pt-4">
-          <StateControl owner={owner} name={name} item={value} />
-        </div>
+        {!readOnly && (
+          <div className="mt-4 border-t border-neutral-800 pt-4">
+            <StateControl owner={owner} name={name} item={value} />
+          </div>
+        )}
       </Panel>
 
-      <RelationGraph owner={owner} name={name} item={value} onOpen={onOpen} />
-      <Discussion owner={owner} name={name} id={id} />
+      <RelationGraph owner={owner} name={name} history={history} item={value} onOpen={onOpen} />
+      <Discussion owner={owner} name={name} id={id} history={history} readOnly={readOnly} />
     </div>
   );
 };

@@ -94,7 +94,12 @@ export const App = () => {
         {tab === "tokens" ? (
           <Tokens />
         ) : active !== null ? (
-          <Workspace owner={active.owner} name={active.name} onClose={() => setActive(null)} />
+          <Workspace
+            owner={active.owner}
+            name={active.name}
+            isAdmin={me.data.user.admin || active.owner === me.data.user.id}
+            onClose={() => setActive(null)}
+          />
         ) : (
           <Repositories me={me.data.user} onOpen={setActive} />
         )}

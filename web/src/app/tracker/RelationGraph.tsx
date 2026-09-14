@@ -1,4 +1,4 @@
-import { useItems } from "../../api/queries";
+import { useItems, type History } from "../../api/queries";
 import type { Item } from "../../api/types";
 import { Empty, Panel } from "../ui";
 
@@ -26,18 +26,20 @@ const targets = (item: Item, key: (typeof EDGES)[number]["key"]): string[] => {
 export const RelationGraph = ({
   owner,
   name,
+  history,
   item,
   onOpen,
 }: {
   owner: string;
   name: string;
+  history: History;
   item: Item;
   onOpen: (id: string) => void;
 }) => {
   // UUIDv7 is time-ordered, so items created in the same second share a long
   // prefix; a truncated id identifies nothing. Titles come from the item list
   // already in cache, and the id remains as the tooltip.
-  const listed = useItems(owner, name, {});
+  const listed = useItems(owner, name, {}, history);
   const titles: Record<string, string> = Object.fromEntries(
     (listed.data?.pages ?? [])
       .flatMap((page) => page.data.items)

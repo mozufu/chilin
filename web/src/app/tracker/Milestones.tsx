@@ -1,9 +1,19 @@
-import { useItems, useMilestoneProgress } from "../../api/queries";
+import { useItems, useMilestoneProgress, type History } from "../../api/queries";
 import type { Item } from "../../api/types";
 import { Empty, ErrorNotice, Panel, Spinner } from "../ui";
 
-const ProgressBar = ({ owner, name, id }: { owner: string; name: string; id: string }) => {
-  const progress = useMilestoneProgress(owner, name, id);
+const ProgressBar = ({
+  owner,
+  name,
+  id,
+  history,
+}: {
+  owner: string;
+  name: string;
+  id: string;
+  history: History;
+}) => {
+  const progress = useMilestoneProgress(owner, name, id, history);
 
   if (progress.isPending) return <div className="h-1.5 animate-pulse rounded-full bg-neutral-800" />;
   if (progress.error !== null) return <ErrorNotice error={progress.error} />;
@@ -39,13 +49,15 @@ const ProgressBar = ({ owner, name, id }: { owner: string; name: string; id: str
 export const Milestones = ({
   owner,
   name,
+  history,
   onOpen,
 }: {
   owner: string;
   name: string;
+  history: History;
   onOpen: (id: string) => void;
 }) => {
-  const query = useItems(owner, name, { kind: "milestone" });
+  const query = useItems(owner, name, { kind: "milestone" }, history);
   const milestones = query.data?.pages.flatMap((page) => page.data.items) ?? [];
 
   return (
@@ -71,7 +83,7 @@ export const Milestones = ({
                     {milestone.milestone?.due_at ?? "no due date"}
                   </span>
                 </div>
-                <ProgressBar owner={owner} name={name} id={milestone.id} />
+                <ProgressBar owner={owner} name={name} id={milestone.id} history={history} />
               </li>
             ))}
           </ul>

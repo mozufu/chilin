@@ -18,20 +18,43 @@ import type {
   TokenInfo,
 } from "./types";
 
+export type ItemFilters = { kind?: Kind; state?: State };
+
+/**
+ * A point in tracker history. The two fields are mutually exclusive on the
+ * server (Chilin.Store.snapshotForRead), so they are modelled as a tagged
+ * choice rather than two optional fields that could both be set.
+ */
+export type History = { at: "now" } | { at: "revision"; revision: string } | { at: "time"; asOf: string };
+
+export const LIVE: History = { at: "now" };
+
+const historyQuery = (history: History): Record<string, string> => {
+  if (history.at === "revision") return { at_revision: history.revision };
+  if (history.at === "time") return { as_of: history.asOf };
+  return {};
+};
+
 export const keys = {
   me: ["me"] as const,
   tokens: ["tokens"] as const,
   identities: ["identities"] as const,
   repos: ["repos"] as const,
-  repo: (owner: string, name: string) => ["repo", owner, name] as const,
-  items: (owner: string, name: string, filters: ItemFilters) =>
-    ["items", owner, name, filters] as const,
-  item: (owner: string, name: string, id: string) => ["item", owner, name, id] as const,
-  timeline: (owner: string, name: string, id: string) => ["timeline", owner, name, id] as const,
-  progress: (owner: string, name: string, id: string) => ["progress", owner, name, id] as const,
+  permissions: (owner: string, name: string) => ["permissions", owner, name] as const,
+  // History is part of every tracker read key: the same path at two points in
+  // history is two distinct resources, and caching them together would show
+  // stale content when the viewer travels.
+  repo: (owner: string, name: string, history: History = LIVE) =>
+    ["repo", owner, name, history] as const,
+  items: (owner: string, name: string, filters: ItemFilters, history: History = LIVE) =>
+    ["items", owner, name, filters, history] as const,
+  item: (owner: string, name: string, id: string, history: History = LIVE) =>
+    ["item", owner, name, id, history] as const,
+  timeline: (owner: string, name: string, id: string, history: History = LIVE) =>
+    ["timeline", owner, name, id, history] as const,
+  progress: (owner: string, name: string, id: string, history: History = LIVE) =>
+    ["progress", owner, name, id, history] as const,
 };
-
-export type ItemFilters = { kind?: Kind; state?: State };
 
 const repoPath = (owner: string, name: string) =>
   `/api/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
@@ -40,11 +63,6 @@ export const useMe = () =>
   useQuery({
     queryKey: keys.me,
     queryFn: async () => (await request<Me>("/api/me")).value,
-    // Both outcomes are answers, not transient faults: 401 is "no credential"
-    // and 403 is "proxy identity not linked". Retrying either just delays the
-    // sign-in view.
-    retry: (count, error) =>
-      !(error instanceof ApiError && (error.isUnauthorized || error.isForbidden)) && count < 2,
     staleTime: 60_000,
   });
 
@@ -74,16 +92,17 @@ export const useRepositories = () =>
  */
 export type RepoSnapshot = { repository: Repository; revision: string; items: Item[] };
 
-export const useRepository = (owner: string, name: string) =>
+export const useRepository = (owner: string, name: string, history: History = LIVE) =>
   useQuery({
-    queryKey: keys.repo(owner, name),
+    queryKey: keys.repo(owner, name, history),
     queryFn: async () => {
+      const query = new URLSearchParams(historyQuery(history)).toString();
       const { value } = await request<{
         repository: Repository;
         revision: string;
         files: Record<string, string>;
         items: Item[];
-      }>(repoPath(owner, name));
+      }>(`${repoPath(owner, name)}${query === "" ? "" : `?${query}`}`);
       return { repository: value.repository, revision: value.revision, items: value.items };
     },
   });
@@ -98,15 +117,20 @@ export const useRepository = (owner: string, name: string) =>
  * A cursor pins the tracker revision it was produced from, which is what makes
  * paging stable while other writers advance the tracker.
  */
-export const useItems = (owner: string, name: string, filters: ItemFilters) =>
+export const useItems = (owner: string, name: string, filters: ItemFilters, history: History = LIVE) =>
   useInfiniteQuery({
-    queryKey: keys.items(owner, name, filters),
+    queryKey: keys.items(owner, name, filters, history),
     initialPageParam: null as string | null,
     queryFn: async ({ pageParam }) => {
-      const query = new URLSearchParams({ limit: "50" });
+      const query = new URLSearchParams({ limit: "50", ...historyQuery(history) });
       if (filters.kind !== undefined) query.set("kind", filters.kind);
       if (filters.state !== undefined) query.set("state", filters.state);
-      if (pageParam !== null) query.set("cursor", pageParam);
+      // A cursor already pins its revision, and the server rejects a cursor
+      // that disagrees with at_revision, so the pin is dropped once paging.
+      if (pageParam !== null) {
+        query.delete("at_revision");
+        query.set("cursor", pageParam);
+      }
       const { value } = await request<{
         revision: string;
         data: { items: Item[]; next_cursor: string | null };
@@ -116,37 +140,56 @@ export const useItems = (owner: string, name: string, filters: ItemFilters) =>
     getNextPageParam: (last) => last.data.next_cursor,
   });
 
-export const useItem = (owner: string, name: string, id: string) =>
+export const useItem = (owner: string, name: string, id: string, history: History = LIVE) =>
   useQuery({
-    queryKey: keys.item(owner, name, id),
+    queryKey: keys.item(owner, name, id, history),
     queryFn: async () => {
+      const query = new URLSearchParams(historyQuery(history)).toString();
       const { value } = await request<{ revision: string; data: Item }>(
-        `${repoPath(owner, name)}/items/${encodeURIComponent(id)}`,
+        `${repoPath(owner, name)}/items/${encodeURIComponent(id)}${query === "" ? "" : `?${query}`}`,
       );
       return value.data;
     },
   });
 
-export const useTimeline = (owner: string, name: string, id: string) =>
+export const useTimeline = (owner: string, name: string, id: string, history: History = LIVE) =>
   useQuery({
-    queryKey: keys.timeline(owner, name, id),
+    queryKey: keys.timeline(owner, name, id, history),
     queryFn: async () => {
+      const query = new URLSearchParams(historyQuery(history)).toString();
       const { value } = await request<{ revision: string; data: { events: TimelineEvent[] } }>(
-        `${repoPath(owner, name)}/items/${encodeURIComponent(id)}/timeline`,
+        `${repoPath(owner, name)}/items/${encodeURIComponent(id)}/timeline${query === "" ? "" : `?${query}`}`,
       );
       return value.data.events;
     },
   });
 
-export const useMilestoneProgress = (owner: string, name: string, id: string) =>
+export const useMilestoneProgress = (
+  owner: string,
+  name: string,
+  id: string,
+  history: History = LIVE,
+) =>
   useQuery({
-    queryKey: keys.progress(owner, name, id),
+    queryKey: keys.progress(owner, name, id, history),
     queryFn: async () => {
+      const query = new URLSearchParams(historyQuery(history)).toString();
       const { value } = await request<{ revision: string; data: MilestoneProgress }>(
-        `${repoPath(owner, name)}/milestones/${encodeURIComponent(id)}/progress`,
+        `${repoPath(owner, name)}/milestones/${encodeURIComponent(id)}/progress${query === "" ? "" : `?${query}`}`,
       );
       return value.data;
     },
+  });
+
+export type Permission = { user: string; access: "read" | "write" | "admin" };
+
+export const usePermissions = (owner: string, name: string, enabled: boolean) =>
+  useQuery({
+    queryKey: keys.permissions(owner, name),
+    enabled,
+    queryFn: async () =>
+      (await request<{ permissions: Permission[] }>(`${repoPath(owner, name)}/permissions`)).value
+        .permissions,
   });
 
 /**
@@ -249,6 +292,27 @@ export const useCredentialMutation = <TVariables, TResult>(
     },
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: invalidate });
+    },
+  });
+};
+
+/**
+ * Grants or revokes repository access. Unlike a tracker write this carries no
+ * revision precondition: permissions live in the registry, not in tracker.git.
+ */
+export const usePermissionMutation = (owner: string, name: string) => {
+  const client = useQueryClient();
+  return useMutation<void, ApiError, { user: string; access: Permission["access"] | null }>({
+    mutationFn: async ({ user, access }) => {
+      const base = `${repoPath(owner, name)}/permissions`;
+      if (access === null) {
+        await request<void>(`${base}/${encodeURIComponent(user)}`, { method: "DELETE" });
+        return;
+      }
+      await request<void>(base, { method: "POST", body: { user, access } });
+    },
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: keys.permissions(owner, name) });
     },
   });
 };

@@ -8,10 +8,10 @@ import "./index.css";
 const client = new QueryClient({
   defaultOptions: {
     queries: {
-      // Authentication and authorisation failures are answers, not faults.
+      // A 4xx is the server's answer, not a transient fault: retrying a
+      // rejected revision or a missing route only delays the diagnostic.
       retry: (count, error) =>
-        !(error instanceof ApiError && (error.isUnauthorized || error.isForbidden || error.status === 404)) &&
-        count < 2,
+        !(error instanceof ApiError && error.status >= 400 && error.status < 500) && count < 2,
       refetchOnWindowFocus: false,
     },
     mutations: { retry: false },
