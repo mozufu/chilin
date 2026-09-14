@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useItem, useTimeline, useTrackerMutation, type History } from "../../api/queries";
 import { STATES, type Item, type State } from "../../api/types";
 import { Button, ErrorNotice, Panel, Spinner } from "../ui";
+import { PullDetail } from "./PullDetail";
 import { RelationGraph } from "./RelationGraph";
 
 const Discussion = ({
@@ -175,6 +176,15 @@ export const ItemDetail = ({
         ← Back to items
       </button>
 
+      {/* A pull request is a task item carrying a pull record, so the pull
+          surface replaces the generic one rather than sitting beside it. */}
+      {value.pull !== undefined ? (
+        <>
+          <PullDetail owner={owner} name={name} id={id} history={history} item={value} />
+          <Discussion owner={owner} name={name} id={id} history={history} readOnly={readOnly} />
+        </>
+      ) : (
+        <>
       <Panel
         title={value.title}
         description={`${value.kind} · ${value.state}${value.key != null ? ` · ${value.key}` : ""}`}
@@ -204,8 +214,10 @@ export const ItemDetail = ({
         )}
       </Panel>
 
-      <RelationGraph owner={owner} name={name} history={history} item={value} onOpen={onOpen} />
-      <Discussion owner={owner} name={name} id={id} history={history} readOnly={readOnly} />
+          <RelationGraph owner={owner} name={name} history={history} item={value} onOpen={onOpen} />
+          <Discussion owner={owner} name={name} id={id} history={history} readOnly={readOnly} />
+        </>
+      )}
     </div>
   );
 };

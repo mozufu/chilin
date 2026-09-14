@@ -41,6 +41,7 @@ export const keys = {
   identities: ["identities"] as const,
   repos: ["repos"] as const,
   permissions: (owner: string, name: string) => ["permissions", owner, name] as const,
+  diff: (owner: string, name: string, id: string) => ["diff", owner, name, id] as const,
   // History is part of every tracker read key: the same path at two points in
   // history is two distinct resources, and caching them together would show
   // stale content when the viewer travels.
@@ -193,6 +194,20 @@ export const usePermissions = (owner: string, name: string, enabled: boolean) =>
   });
 
 /**
+ * The recorded diff for a pull. Both operands are OIDs stored on the pull, so
+ * the patch never shifts because a branch moved (Chilin.Pulls.pullDiff); it is
+ * therefore safe to cache indefinitely against the pull's head.
+ */
+export type PullDiff = { item_id: string; base_oid: string; head_oid: string; diff: string };
+
+export const usePullDiff = (owner: string, name: string, id: string) =>
+  useQuery({
+    queryKey: keys.diff(owner, name, id),
+    queryFn: async () =>
+      (await request<PullDiff>(`${repoPath(owner, name)}/pulls/${encodeURIComponent(id)}/diff`)).value,
+  });
+
+/**
  * Reads the revision the client most recently observed for a repository.
  * Returns null when nothing has been read yet, which forces the caller to
  * fetch before mutating rather than guessing a precondition.
@@ -313,6 +328,76 @@ export const usePermissionMutation = (owner: string, name: string) => {
     },
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: keys.permissions(owner, name) });
+    },
+  });
+};
+
+export type MergeOutcome = {
+  status: "completed" | "prepared" | "aborted";
+  merge_oid?: string;
+  item_id?: string;
+};
+
+/**
+ * Merges a pull request.
+ *
+ * A merge normally answers with the completed result: the server prepares the
+ * intent and finalises it under the same lock (Chilin.Pulls.mergePull). It can
+ * only answer "prepared" when the connection was interrupted between those
+ * steps, in which case the outcome is recoverable from the operation record —
+ * so the same key is polled rather than the merge being reissued, which would
+ * risk acting twice.
+ */
+export const useMergePull = (owner: string, name: string, id: string) => {
+  const client = useQueryClient();
+  return useMutation<
+    MergeOutcome,
+    ApiError,
+    { head_oid: string; target_oid: string; onPending?: () => void }
+  >({
+    mutationFn: async ({ head_oid, target_oid, onPending }) => {
+      const operation = crypto.randomUUID();
+      const path = `${repoPath(owner, name)}/pulls/${encodeURIComponent(id)}/merge`;
+      const body = { head_oid, target_oid };
+
+      const attempt = async (revision: string) =>
+        mutate<MergeOutcome>(path, { body, revision, idempotencyKey: operation });
+
+      let revision = cachedRevision(client, owner, name);
+      if (revision === null) {
+        revision = (await client.fetchQuery<RepoSnapshot>({ queryKey: keys.repo(owner, name) })).revision;
+      }
+
+      let outcome: MergeOutcome;
+      try {
+        outcome = (await attempt(revision)).data;
+      } catch (error) {
+        if (!(error instanceof ApiError) || !error.isStale) throw error;
+        const refreshed = await client.fetchQuery<RepoSnapshot>({ queryKey: keys.repo(owner, name) });
+        outcome = (await attempt(refreshed.revision)).data;
+      }
+
+      if (outcome.status !== "prepared") return outcome;
+
+      onPending?.();
+      // Finalisation runs under the repository lock, so the record settles
+      // shortly; polling is bounded so a stuck intent surfaces as an error
+      // rather than an indefinite spinner.
+      for (let attemptNumber = 0; attemptNumber < 20; attemptNumber += 1) {
+        const settle = Promise.withResolvers<void>();
+        setTimeout(settle.resolve, 500);
+        await settle.promise;
+        const { value } = await request<{ revision: string; data: MergeOutcome }>(
+          `${repoPath(owner, name)}/operations/${encodeURIComponent(operation)}`,
+        );
+        if (value.data.status !== "prepared") return value.data;
+      }
+      throw new ApiError(504, "Merge is still finalising; reload to see the outcome");
+    },
+    onSuccess: () => {
+      for (const prefix of ["repo", "items", "item", "timeline", "progress", "diff"]) {
+        void client.invalidateQueries({ queryKey: [prefix, owner, name] });
+      }
     },
   });
 };

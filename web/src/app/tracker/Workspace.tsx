@@ -7,8 +7,9 @@ import { HistoryControl } from "./HistoryControl";
 import { ItemDetail } from "./ItemDetail";
 import { ItemList } from "./ItemList";
 import { Milestones } from "./Milestones";
+import { Pulls } from "./Pulls";
 
-type Section = "items" | "milestones" | "people" | "new";
+type Section = "items" | "pulls" | "milestones" | "people" | "new";
 
 export const Workspace = ({
   owner,
@@ -30,7 +31,9 @@ export const Workspace = ({
   // Offering edit controls here would produce writes the user did not intend
   // against content they are not looking at.
   const historical = history.at !== "now";
-  const sections: Section[] = historical ? ["items", "milestones"] : ["items", "milestones", "people", "new"];
+  const sections: Section[] = historical
+    ? ["items", "pulls", "milestones"]
+    : ["items", "pulls", "milestones", "people", "new"];
 
 
 
@@ -89,6 +92,9 @@ export const Workspace = ({
 
             {section === "items" && (
               <ItemList owner={owner} name={name} history={history} onOpen={setOpenItem} />
+            )}
+            {section === "pulls" && (
+              <Pulls owner={owner} name={name} history={history} onOpen={setOpenItem} />
             )}
             {section === "milestones" && (
               <Milestones owner={owner} name={name} history={history} onOpen={setOpenItem} />
