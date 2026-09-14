@@ -1,15 +1,16 @@
 module Main (main) where
 
-import Chilin.Repository (bootstrapAdmin, openEnv, openEnvWith)
+import Chilin.Repository (bootstrapAdmin, bootstrapIdentity, openEnv, openEnvWith)
 import Chilin.Server (loopbackAddress, serve)
 import Chilin.Transport (runSSH)
-import Chilin.Types (ForwardAuth (..))
+import Chilin.Types (AppError (..), ForwardAuth (..))
 import Control.Exception (SomeException, displayException, fromException, throwIO, try)
 import Control.Monad (unless, when)
 import Data.ByteString.Char8 qualified as B8
 import Data.CaseInsensitive qualified as CI
 import Data.Maybe (fromMaybe)
 import Data.Text qualified as T
+import Network.HTTP.Types (statusCode)
 import System.Environment (getArgs, lookupEnv)
 import System.Exit (ExitCode, die)
 import Text.Read (readMaybe)
@@ -23,6 +24,9 @@ main = do
     -- `die` already printed its diagnostic; rewrapping the ExitCode would
     -- bury it under a GHC backtrace.
     Left err | Just code <- fromException err -> throwIO (code :: ExitCode)
+    -- AppError carries an operator-facing message, and these commands run from
+    -- deploy scripts where a GHC backtrace buries it.
+    Left err | Just (AppError status message) <- fromException err -> die (show (statusCode status) <> " " <> T.unpack message)
     Left err -> die (displayException err)
 
 run :: [String] -> IO ()
@@ -60,6 +64,15 @@ run ("serve" : args) = do
   serve env host port
  where
   header = B8.unpack . CI.original . forwardHeader
+run ("link" : args) = do
+  options <- parseOptions ["--root", "--provider", "--subject", "--user"] args
+  let root = option "--root" "data" options
+      provider = option "--provider" "github" options
+  subject <- maybe (die "link requires --subject") pure (lookup "--subject" options)
+  user <- maybe (die "link requires --user") pure (lookup "--user" options)
+  env <- openEnv root
+  bootstrapIdentity env (T.pack provider) (T.pack subject) (T.pack user)
+  putStrLn ("Linked " <> provider <> ":" <> subject <> " to " <> user)
 run ("ssh" : args) = do
   options <- parseOptions ["--root"] args
   token <- requiredEnv "CHILIN_TOKEN"
@@ -93,6 +106,9 @@ usage =
     , "             [--forward-auth-header X-Forwarded-User] [--forward-auth-provider github]"
     , "  Forward auth trusts the named header only from loopback peers and only"
     , "  for subjects already linked via /api/identities; it requires a loopback --host."
+    , "chilin link [--root data] [--provider github] --subject <id> --user <name>"
+    , "  Links a forward-auth subject to an existing user without going through"
+    , "  the API; idempotent, for provisioning the first operator identity."
     , "chilin ssh [--root data]"
     , "  Restricted SSH forced command; CHILIN_TOKEN and SSH_ORIGINAL_COMMAND required."
     , ""

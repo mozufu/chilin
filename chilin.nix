@@ -64,6 +64,7 @@ mkDerivation {
   ];
   executableHaskellDepends = [
     base
+    http-types
     text
   ];
   testHaskellDepends = [

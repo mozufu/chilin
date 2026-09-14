@@ -2,6 +2,7 @@ module Chilin.Repository
   ( openEnv
   , openEnvWith
   , bootstrapAdmin
+  , bootstrapIdentity
   , lookupActor
   , lookupIdentity
   , createUser
@@ -250,6 +251,25 @@ linkIdentity env actor provider subject user = do
     unless (null existing) $ conflict "Identity is already linked"
     execute db "INSERT INTO identities(provider,subject,user_name) VALUES (?,?,?)" (provider, subject, user)
     pure (IdentityInfo provider subject user)
+
+-- Forward auth only admits subjects that are already linked, and linking over
+-- HTTP needs an authenticated administrator, so a freshly provisioned host has
+-- no way in. This is the offline counterpart to bootstrapAdmin: it runs as the
+-- operator on the machine holding the data, and is idempotent so it can sit in
+-- a declarative activation script that reruns on every deploy.
+bootstrapIdentity :: Env -> Text -> Text -> Text -> IO ()
+bootstrapIdentity env provider subject user = do
+  validateProvider provider
+  validateSubject subject
+  validateName user
+  withMVar (envDatabase env) $ \db -> withTransaction db $ do
+    users <- query db "SELECT name FROM users WHERE name=?" (Only user) :: IO [Only Text]
+    when (null users) $ notFound "User does not exist"
+    existing <- query db "SELECT user_name FROM identities WHERE provider=? AND subject=?" (provider, subject) :: IO [Only Text]
+    case existing of
+      [] -> execute db "INSERT INTO identities(provider,subject,user_name) VALUES (?,?,?)" (provider, subject, user)
+      [Only owner] | owner == user -> pure ()
+      _ -> conflict "Identity is already linked to a different user"
 
 unlinkIdentity :: Env -> Actor -> Text -> Text -> IO ()
 unlinkIdentity env actor provider subject = do
